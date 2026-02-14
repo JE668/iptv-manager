@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NextGen | Access Control</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        body {
+            background-color: #0a0c10;
+            color: #e6edf3;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .login-card {
+            background: rgba(23, 27, 34, 0.8);
+            backdrop-filter: blur(12px);
+            border: 1px solid rgba(48, 54, 61, 0.8);
+            border-radius: 16px;
+            padding: 2.5rem;
+            width: 100%;
+            max-width: 400px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+        }
+        .brand {
+            color: #00d4ff;
+            font-weight: 800;
+            font-size: 1.5rem;
+            text-align: center;
+            margin-bottom: 2rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 10px;
+        }
+        .form-control {
+            background: rgba(0, 0, 0, 0.3);
+            border: 1px solid rgba(48, 54, 61, 0.8);
+            color: #fff;
+            margin-bottom: 1rem;
+        }
+        .form-control:focus {
+            background: rgba(0, 0, 0, 0.4);
+            border-color: #00d4ff;
+            box-shadow: 0 0 10px rgba(0, 212, 255, 0.2);
+            color: #fff;
+        }
+        .btn-login {
+            background: #00d4ff;
+            border: none;
+            color: #000;
+            font-weight: 700;
+            width: 100%;
+            padding: 0.8rem;
+            border-radius: 8px;
+            margin-top: 1rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card">
+        <div class="brand">
+            <i data-lucide="shield-check"></i> SECURITY ACCESS
+        </div>
+        <form action="/login" method="post">
+            <div class="mb-3">
+                <label class="small text-muted">IDENTITY</label>
+                <input type="text" name="username" class="form-control" placeholder="Admin Username" required>
+            </div>
+            <div class="mb-3">
+                <label class="small text-muted">ACCESS CODE</label>
+                <input type="password" name="password" class="form-control" placeholder="Password" required>
+            </div>
+            <button type="submit" class="btn-login">AUTHENTICATE</button>
+        </form>
+        <div class="text-center mt-4 small text-muted">
+            NextGen IPTV Management System v2.0
+        </div>
+    </div>
+    <script>lucide.createIcons();</script>
+</body>
+</html>
