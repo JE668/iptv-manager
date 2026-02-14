@@ -115,7 +115,15 @@ async def proxy_live(channel_name: str, url: str):
 @app.get("/playlist.m3u")
 async def get_m3u(request: Request, proxy: bool = False):
     channels = {}
-    base_url = str(request.base_url).rstrip('/')
+    
+    # --- 自动识别 HTTPS 协议的核心逻辑 ---
+    # 检查反向代理传来的协议头部，如果没有则使用本地请求协议
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    # 获取外部访问的主机名（域名）
+    host = request.headers.get("host", str(request.base_url.netloc))
+    # 拼接出正确的 Base URL
+    base_url = f"{scheme}://{host}"
+    
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
 
@@ -142,14 +150,24 @@ async def get_m3u(request: Request, proxy: bool = False):
                                 channels[name.strip()] = url.strip()
             except: continue
 
-    output = '#EXTM3U x-tvg-url="https://epg.170909.xyz:1799/t.xml.gz"\n'
+    output = f'#EXTM3U x-tvg-url="https://epg.170909.xyz:1799/t.xml.gz"\n'
     for name, url in channels.items():
         logo = f"https://gcore.jsdelivr.net/gh/taksssss/tv/icon/{name}.png"
-        final_url = f"{base_url}/live/{name}?url={url}" if proxy else url
+        
+        # 关键点：如果开启代理模式，使用生成的 https 基础链接
+        # 这样客户端通过 HTTPS 请求视频流，Docker 内部再去 HTTP 请求上游，从而解决不兼容问题
+        if proxy:
+            # 注意：url 需要进行简单的二次编码，防止参数冲突
+            import urllib.parse
+            encoded_url = urllib.parse.quote(url, safe='')
+            final_url = f"{base_url}/live/{name}?url={encoded_url}"
+        else:
+            final_url = url
+            
         output += f'#EXTINF:-1 tvg-name="{name}" tvg-logo="{logo}" group-title="聚合频道",{name}\n{final_url}\n'
     
     return Response(content=output, media_type="application/x-mpegurl")
-
+    
 @app.post("/add_source")
 async def add_source(name: str = Form(...), url: str = Form(...), type: str = Form(...)):
     with Session(engine) as session:
