@@ -1,14 +1,14 @@
 from fastapi import FastAPI, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from sqlmodel import SQLModel, Field, create_all, Session, select, create_engine
+from sqlmodel import SQLModel, Field, Session, select, create_engine
 import httpx
 import re
 import os
 
 # --- 1. 数据库设置 ---
-# 数据库文件会保存在 /app/data/iptv.db，方便 Docker 挂载
 DB_FILE = "/app/data/iptv.db"
+# 确保目录存在
 os.makedirs("/app/data", exist_ok=True)
 engine = create_engine(f"sqlite:///{DB_FILE}")
 
@@ -18,13 +18,15 @@ class Source(SQLModel, table=True):
     url: str
     type: str # m3u 或 txt
 
-# 初始化数据库
+# 初始化数据库 (修正点：SQLModel 内部会通过 metadata 处理，不需要单独 import create_all)
 SQLModel.metadata.create_all(engine)
 
 app = FastAPI()
+
+# 确保 templates 目录路径正确
 templates = Jinja2Templates(directory="templates")
 
-# --- 2. 后端管理界面 (Dashboard 雏形) ---
+# --- 2. 后端管理界面 ---
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -54,12 +56,13 @@ async def delete_source(source_id: int):
 @app.get("/playlist.m3u")
 async def get_m3u():
     channels = {}
+    # tvg-logo 链接前缀
     logo_base = "https://gcore.jsdelivr.net/gh/taksssss/tv/icon/"
     
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
 
-    async with httpx.AsyncClient(timeout=10.0) as client:
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         for source in sources:
             try:
                 resp = await client.get(source.url)
@@ -68,20 +71,31 @@ async def get_m3u():
                     lines = content.split('\n')
                     for i in range(len(lines)):
                         if "#EXTINF" in lines[i]:
+                            # 提取频道名
                             name_match = re.search(r',([^,]+)$', lines[i])
                             if name_match:
                                 name = name_match.group(1).strip()
-                                url = lines[i+1].strip()
-                                if name not in channels: channels[name] = url
+                                # 下一行通常是 URL
+                                if i + 1 < len(lines):
+                                    url = lines[i+1].strip()
+                                    if url.startswith("http"):
+                                        if name not in channels: 
+                                            channels[name] = url
                 else:
+                    # TXT 格式解析
                     for line in content.split('\n'):
                         if ',' in line:
-                            name, url = line.split(',', 1)
-                            name = name.strip()
-                            if name not in channels: channels[name] = url.strip()
-            except:
+                            parts = line.split(',', 1)
+                            if len(parts) == 2:
+                                name, url = parts
+                                name = name.strip()
+                                if name not in channels: 
+                                    channels[name] = url.strip()
+            except Exception as e:
+                print(f"Error parsing source {source.name}: {e}")
                 continue
 
+    # 聚合 EPG (暂时硬编码，后续可改为配置)
     output = '#EXTM3U x-tvg-url="https://epg.170909.xyz:1799/t.xml.gz"\n'
     for name, url in channels.items():
         logo = f"{logo_base}{name}.png"
