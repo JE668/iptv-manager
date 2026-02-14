@@ -4,3 +4,4 @@ httpx
 python-multipart
 sqlmodel
 jinja2
+lxml
