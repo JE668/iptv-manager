@@ -7,24 +7,23 @@ import time
 import urllib.parse
 import gzip
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List, Dict
 
 import httpx
-from fastapi import FastAPI, Form, Request, Response, BackgroundTasks, Depends, HTTPException
+from fastapi import FastAPI, Form, Request, Response, BackgroundTasks, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import text
+from lxml import etree
 
-# --- 1. 配置与安全设置 ---
+# --- 1. 配置与数据库 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPTV-Manager")
 
-# 从环境变量读取账号密码，默认 admin / admin123
 ADMIN_USER = os.getenv("ADMIN_USER", "admin")
 ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
-# 用于 Cookie 加密的密钥
 SECRET_KEY = hashlib.sha256(ADMIN_PASS.encode()).hexdigest()
 
 DB_FILE = "/app/data/iptv.db"
@@ -39,7 +38,31 @@ class Source(SQLModel, table=True):
     status: str = "Unknown"
     last_check: float = 0
 
+class EPGSource(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    url: str
+    status: str = "Unknown"
+
+# 新增：存储全局配置（如 EPG 天数）
+class Setting(SQLModel, table=True):
+    key: str = Field(primary_key=True)
+    value: str
+
 SQLModel.metadata.create_all(engine)
+
+# 自动迁移
+with engine.connect() as conn:
+    try:
+        inspector = conn.execute(text("PRAGMA table_info(source)"))
+        columns = [row[1] for row in inspector]
+        if "status" not in columns: conn.execute(text("ALTER TABLE source ADD COLUMN status VARCHAR DEFAULT 'Unknown'"))
+        # 初始化设置
+        with Session(engine) as session:
+            if not session.get(Setting, "epg_days"):
+                session.add(Setting(key="epg_days", value="3"))
+                session.commit()
+    except: pass
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -47,74 +70,170 @@ LOGO_BASE = "https://gcore.jsdelivr.net/gh/taksssss/tv/icon/"
 
 class GlobalState:
     def __init__(self):
-        self.epg_content = b""
+        self.epg_xml = b""
+        self.epg_gz = b""
         self.is_checking = False
 
 state = GlobalState()
 
-# --- 2. 身份验证助手 ---
-
+# --- 2. 身份验证 ---
 def is_authenticated(request: Request):
-    """检查用户是否已登录"""
     return request.cookies.get("session_id") == SECRET_KEY
 
-def login_required(request: Request):
-    """用于保护路由的快捷判断"""
-    if not is_authenticated(request):
-        raise HTTPException(status_code=303, detail="Not Authenticated")
+# --- 3. EPG 聚合引擎 ---
 
-# --- 3. 登录/注销路由 ---
+def parse_epg_time(t_str):
+    """解析 XMLTV 时间格式 20231024120000 +0800"""
+    try:
+        return datetime.strptime(t_str[:14], "%Y%m%d%H%M%S")
+    except:
+        return None
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    if is_authenticated(request):
-        return RedirectResponse(url="/", status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request})
+async def merge_epg_data():
+    """下载、过滤并聚合多个 EPG 源"""
+    logger.info("开始聚合 EPG 数据...")
+    
+    with Session(engine) as session:
+        epg_sources = session.exec(select(EPGSource)).all()
+        days_limit = int(session.get(Setting, "epg_days").value)
 
-@app.post("/login")
-async def login(username: str = Form(...), password: str = Form(...)):
-    if username == ADMIN_USER and password == ADMIN_PASS:
-        response = RedirectResponse(url="/", status_code=303)
-        # 设置持久化 Cookie，有效期 7 天
-        response.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True)
-        return response
-    return RedirectResponse(url="/login?error=1", status_code=303)
+    if not epg_sources:
+        state.epg_xml = b'<?xml version="1.0" encoding="UTF-8"?><tv></tv>'
+        return
 
-@app.get("/logout")
-async def logout():
-    response = RedirectResponse(url="/login", status_code=303)
-    response.delete_cookie("session_id")
-    return response
+    master_root = etree.Element("tv")
+    master_root.set("generator-info-name", "NextGen-IPTV-Manager")
+    
+    seen_channel_ids = set()
+    cutoff_date = datetime.now() - timedelta(days=1) # 昨天之后的
+    end_date = datetime.now() + timedelta(days=days_limit) # 限制未来天数
 
-# --- 4. 管理路由 (增加安全检查) ---
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+        for source in epg_sources:
+            try:
+                r = await client.get(source.url)
+                content = r.content
+                # 如果是 gz，解压
+                if source.url.endswith(".gz") or content[:2] == b'\x1f\x8b':
+                    content = gzip.decompress(content)
+                
+                parser = etree.XMLParser(recover=True)
+                root = etree.fromstring(content, parser=parser)
+                
+                # 1. 提取频道定义
+                for channel in root.xpath("//channel"):
+                    c_id = channel.get("id")
+                    if c_id not in seen_channel_ids:
+                        master_root.append(channel)
+                        seen_channel_ids.add(c_id)
+                
+                # 2. 提取节目单并过滤时间
+                for prog in root.xpath("//programme"):
+                    start_time = parse_epg_time(prog.get("start"))
+                    if start_time and cutoff_date <= start_time <= end_date:
+                        master_root.append(prog)
+                
+                source.status = "Success"
+            except Exception as e:
+                logger.error(f"EPG Source Error {source.name}: {e}")
+                source.status = "Error"
+            
+            with Session(engine) as session:
+                session.add(source); session.commit()
+
+    # 生成 XML 字节流
+    final_xml = etree.tostring(master_root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+    state.epg_xml = final_xml
+    state.epg_gz = gzip.compress(final_xml)
+    logger.info(f"EPG 聚合完成，最终大小: {len(final_xml)//1024} KB")
+
+# --- 4. 维护任务 ---
+async def run_maintenance():
+    if state.is_checking: return
+    state.is_checking = True
+    # 检测源存活... (复用之前的逻辑)
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        with Session(engine) as session:
+            sources = session.exec(select(Source)).all()
+            for s in sources:
+                try:
+                    r = await client.get(s.url, headers={"Range": "bytes=0-100"})
+                    s.status = "Online" if r.status_code < 400 else "Offline"
+                except: s.status = "Offline"
+                s.last_check = time.time()
+                session.add(s)
+            session.commit()
+    
+    # 执行 EPG 聚合
+    await merge_epg_data()
+    state.is_checking = False
+
+async def maintenance_loop():
+    while True:
+        await run_maintenance()
+        await asyncio.sleep(6 * 3600)
+
+@app.on_event("startup")
+async def startup_event():
+    asyncio.create_task(maintenance_loop())
+
+# --- 5. 路由 ---
+
+@app.get("/epg.xml")
+async def get_epg_xml():
+    return Response(content=state.epg_xml, media_type="application/xml")
+
+@app.get("/epg.xml.gz")
+async def get_epg_gz():
+    return Response(content=state.epg_gz, media_type="application/gzip")
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    if not is_authenticated(request):
-        return RedirectResponse(url="/login", status_code=303)
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
-    return templates.TemplateResponse("index.html", {"request": request, "sources": sources})
+        epg_sources = session.exec(select(EPGSource)).all()
+        epg_days = session.get(Setting, "epg_days").value
+    return templates.TemplateResponse("index.html", {
+        "request": request, 
+        "sources": sources, 
+        "epg_sources": epg_sources,
+        "epg_days": epg_days
+    })
 
-@app.get("/api/status")
-async def get_api_status(request: Request):
-    if not is_authenticated(request):
-        return {"active_streams": [], "is_checking": False, "auth": False}
-    
-    active = []
-    for s_id, data in stream_pool.streams.items():
-        active.append({
-            "name": data["name"],
-            "url": data["url"],
-            "clients": list(data["clients"].values()),
-            "client_count": len(data["clients"]),
-            "speed": data["speed"],
-            "info": data["info"]
-        })
-    return {"active_streams": active, "is_checking": state.is_checking, "auth": True}
+@app.post("/update_epg_settings")
+async def update_epg_settings(request: Request, days: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        s = session.get(Setting, "epg_days")
+        s.value = days
+        session.add(s); session.commit()
+    asyncio.create_task(run_maintenance())
+    return RedirectResponse(url="/", status_code=303)
 
-# --- 此处复用之前的 StreamPool, fetch_all, maintenance 等所有逻辑 ---
-# (为了节省篇幅，以下仅展示关键变动，请确保将其余逻辑完整保留)
+@app.post("/add_epg_source")
+async def add_epg_source(request: Request, name: str = Form(...), url: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        session.add(EPGSource(name=name, url=url))
+        session.commit()
+    asyncio.create_task(run_maintenance())
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/delete_epg/{eid}")
+async def delete_epg(request: Request, eid: int):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        e = session.get(EPGSource, eid)
+        if e: session.delete(e); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+
+# ---------------------------------------------------------
+# 此处下方粘贴之前的登录(/login)、注销(/logout)、监控API(/api/status)、
+# 播放接口(/live/{name})、列表接口(/playlist.m3u) 等逻辑
+# ---------------------------------------------------------
+
+# (请确保 StreamPool 类定义和订阅逻辑也在其中)
 
 class StreamPool:
     def __init__(self): self.streams: Dict = {}
@@ -129,6 +248,7 @@ class StreamPool:
                 return {"res": f"{s.get('width')}x{s.get('height')}", "codec": s.get('codec_name', '未知').upper()}
         except: pass
         return {"res": "未知", "codec": "未知"}
+    
     async def _fetcher(self, stream_id: str, url: str, name: str):
         retry_count = 0
         while stream_id in self.streams:
@@ -179,32 +299,36 @@ class StreamPool:
 
 stream_pool = StreamPool()
 
-async def run_maintenance():
-    if state.is_checking: return
-    state.is_checking = True
-    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        with Session(engine) as session:
-            sources = session.exec(select(Source)).all()
-            for s in sources:
-                try:
-                    r = await client.get(s.url, headers={"Range": "bytes=0-100"})
-                    s.status = "Online" if r.status_code < 400 else "Offline"
-                except: s.status = "Offline"
-                s.last_check = time.time()
-                session.add(s)
-            session.commit()
-        try:
-            r = await client.get("https://epg.170909.xyz:1799/t.xml.gz")
-            if r.status_code == 200: state.epg_content = gzip.decompress(r.content)
-        except: pass
-    state.is_checking = False
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request):
+    if is_authenticated(request): return RedirectResponse(url="/", status_code=303)
+    return templates.TemplateResponse("login.html", {"request": request})
 
-async def maintenance_loop():
-    while True: await run_maintenance(); await asyncio.sleep(4 * 3600)
-@app.on_event("startup")
-async def startup_event(): asyncio.create_task(maintenance_loop())
+@app.post("/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    if username == ADMIN_USER and password == ADMIN_PASS:
+        resp = RedirectResponse(url="/", status_code=303)
+        resp.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True)
+        return resp
+    return RedirectResponse(url="/login?error=1", status_code=303)
 
-# --- 公开接口 (播放器使用) ---
+@app.get("/logout")
+async def logout():
+    resp = RedirectResponse(url="/login", status_code=303)
+    resp.delete_cookie("session_id"); return resp
+
+@app.get("/api/status")
+async def get_api_status(request: Request):
+    if not is_authenticated(request): return {"active_streams": [], "is_checking": False}
+    active = []
+    for s_id, data in stream_pool.streams.items():
+        active.append({"name": data["name"], "url": data["url"], "clients": list(data["clients"].values()), "client_count": len(data["clients"]), "speed": data["speed"], "info": data["info"]})
+    return {"active_streams": active, "is_checking": state.is_checking}
+
+@app.get("/live/{channel_name}")
+async def proxy_live(request: Request, channel_name: str, url: str):
+    client_ip = request.headers.get("x-real-ip") or request.client.host
+    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t")
 
 @app.get("/playlist.m3u")
 @app.get("/playlist.txt")
@@ -213,75 +337,19 @@ async def get_playlist(request: Request, proxy: bool = False):
     host = request.headers.get("host", str(request.base_url.netloc))
     base_url = f"{scheme}://{host}"
     unique_channels, seen_urls = [], set()
-    with Session(engine) as session:
-        sources = session.exec(select(Source)).all()
+    with Session(engine) as session: sources = session.exec(select(Source)).all()
     async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
         for s in sources:
             try:
                 resp = await client.get(s.url); lines = resp.text.split('\n')
-                if s.type == 'm3u':
-                    for i in range(len(lines)):
-                        line = lines[i].strip()
-                        if line.startswith("#EXTINF"):
-                            group_match = re.search(r'group-title="(.*?)"', line)
-                            raw_name = line.split(',')[-1].strip()
-                            clean_name = raw_name.upper().replace(" ", "") # 简化版清洗
-                            for j in range(i + 1, min(i + 5, len(lines))):
-                                u = lines[j].strip()
-                                if u.startswith("http") and u not in seen_urls:
-                                    unique_channels.append({"name": raw_name, "url": u, "group": group_match.group(1) if group_match else "聚合"})
-                                    seen_urls.add(u); break
-                else:
-                    for line in lines:
-                        if ',' in line:
-                            name, url = line.split(',', 1); u = url.strip()
-                            if u not in seen_urls:
-                                unique_channels.append({"name": name.strip(), "url": u, "group": "聚合"}); seen_urls.add(u)
+                for i in range(len(lines)):
+                    line = lines[i].strip()
+                    if line.startswith("#EXTINF"):
+                        name = line.split(',')[-1].strip()
+                        for j in range(i+1, min(i+5, len(lines))):
+                            u = lines[j].strip()
+                            if u.startswith("http") and u not in seen_urls:
+                                unique_channels.append({"name": name, "url": u}); seen_urls.add(u); break
             except: continue
-    
-    unique_channels.sort(key=lambda x: (x['group'], x['name']))
     if request.url.path.endswith('.txt'):
-        lines, current_group = [], ""
-        for c in unique_channels:
-            if c['group'] != current_group: current_group = c['group']; lines.append(f"{current_group},#genre#")
-            url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if proxy else c['url']
-            lines.append(f"{c['name']},{url}")
-        return Response(content="\n".join(lines), media_type="text/plain")
-    else:
-        output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml"\n'
-        for c in unique_channels:
-            logo = f"{LOGO_BASE}{c['name']}.png"
-            url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if proxy else c['url']
-            output += f'#EXTINF:-1 tvg-name="{c["name"]}" tvg-logo="{logo}" group-title="{c["group"]}",{c["name"]}\n{url}\n'
-        return Response(content=output, media_type="application/x-mpegurl")
-
-@app.get("/live/{channel_name}")
-async def proxy_live(request: Request, channel_name: str, url: str):
-    client_ip = request.headers.get("x-real-ip") or request.client.host
-    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t")
-
-@app.get("/epg.xml")
-async def get_epg():
-    if not state.epg_content: return Response(content='<?xml version="1.0" encoding="UTF-8"?><tv></tv>', media_type="application/xml")
-    return Response(content=state.epg_content, media_type="application/xml")
-
-# --- 操作路由 (需要登录) ---
-
-@app.post("/add_source")
-async def add_source(request: Request, name: str = Form(...), url: str = Form(...), type: str = Form(...)):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    with Session(engine) as session: session.add(Source(name=name, url=url, type=type)); session.commit()
-    asyncio.create_task(run_maintenance()); return RedirectResponse(url="/", status_code=303)
-
-@app.get("/delete/{source_id}")
-async def delete_source(request: Request, source_id: int):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    with Session(engine) as session:
-        source = session.get(Source, source_id)
-        if source: session.delete(source); session.commit()
-    return RedirectResponse(url="/", status_code=303)
-
-@app.get("/refresh")
-async def manual_refresh(request: Request):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    asyncio.create_task(run_maintenance()); return RedirectResponse(url="/", status_code=303)
+        lines = [f"{c['name']},{f'{base_url}/live/{c['name']}?
