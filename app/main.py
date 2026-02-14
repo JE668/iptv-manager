@@ -9,6 +9,7 @@ import asyncio
 import time
 import json
 import urllib.parse
+import hashlib
 
 # --- 1. 数据库与初始化 ---
 DB_FILE = "/app/data/iptv.db"
@@ -19,145 +20,106 @@ class Source(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str
     url: str
-    type: str
+    type: str # m3u 或 txt
 
 SQLModel.metadata.create_all(engine)
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
-# --- 2. 真正的一拉多缓冲池逻辑 ---
+# --- 2. 增强型缓冲池与探测引擎 ---
 
 class StreamPool:
     def __init__(self):
-        # 存储流信息和订阅者
-        # { channel_name: {"queues": [], "task": Task, "info": {}, "speed": ""} }
+        # Key 改为 URL 的哈希值，防止同名频道冲突
         self.streams = {}
 
     async def get_stream_info(self, url):
-        """增强版 ffprobe 探测"""
+        """深度探测：增加分析时长，提高编码和分辨率准确度"""
         try:
-            # 增加探测时间限制和格式指定，提高成功率
             cmd = [
                 'ffprobe', '-v', 'quiet', '-print_format', 'json',
                 '-show_streams', '-select_streams', 'v:0',
-                '-analyzeduration', '2000000', '-probesize', '2000000', url
+                # 提高探测上限以识别复杂编码
+                '-analyzeduration', '5000000', 
+                '-probesize', '5000000', 
+                url
             ]
             proc = await asyncio.create_subprocess_exec(
                 *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
             )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             data = json.loads(stdout)
             if 'streams' in data and len(data['streams']) > 0:
                 s = data['streams'][0]
-                return {
-                    "res": f"{s.get('width')}x{s.get('height')}",
-                    "codec": s.get('codec_name'),
-                    "fps": s.get('avg_frame_rate')
-                }
-        except Exception as e:
-            print(f"Probe Error: {e}")
+                res = f"{s.get('width')}x{s.get('height')}"
+                codec = s.get('codec_name', '未知').upper()
+                fps = s.get('avg_frame_rate', '未知')
+                return {"res": res, "codec": codec, "fps": fps}
+        except:
+            pass
         return {"res": "未知", "codec": "未知", "fps": "未知"}
 
-    async def _fetcher(self, channel_name, url):
-        """后台拉流单例任务"""
-        print(f"🚀 启动上游拉流: {channel_name}")
+    async def _fetcher(self, stream_id, url):
+        print(f"🚀 启动拉流任务: {stream_id}")
         start_time = time.time()
         bytes_count = 0
-        
         try:
-            # 获取元数据
+            # 探测信息
             info = await self.get_stream_info(url)
-            self.streams[channel_name]["info"] = info
+            if stream_id in self.streams:
+                self.streams[stream_id]["info"] = info
 
             async with httpx.AsyncClient(timeout=None, follow_redirects=True) as client:
                 async with client.stream("GET", url) as r:
-                    async for chunk in r.aiter_bytes(chunk_size=128*1024): # 128KB 块
-                        # 计算网速
+                    async for chunk in r.aiter_bytes(chunk_size=128*1024):
                         bytes_count += len(chunk)
                         now = time.time()
                         if now - start_time >= 1.0:
                             speed = (bytes_count / 1024) / (now - start_time)
-                            self.streams[channel_name]["speed"] = f"{speed:.1f} KB/s"
+                            if stream_id in self.streams:
+                                self.streams[stream_id]["speed"] = f"{speed:.1f} KB/s"
                             bytes_count = 0
                             start_time = now
 
-                        # 分发给所有订阅者
-                        if not self.streams[channel_name]["queues"]:
-                            break # 没人看了，退出
-                        
-                        for q in self.streams[channel_name]["queues"]:
+                        if stream_id not in self.streams or not self.streams[stream_id]["queues"]:
+                            break
+                        for q in self.streams[stream_id]["queues"]:
                             await q.put(chunk)
-        except Exception as e:
-            print(f"Fetcher Error: {e}")
         finally:
-            print(f"🛑 停止上游拉流: {channel_name}")
-            self.streams.pop(channel_name, None)
+            self.streams.pop(stream_id, None)
 
-    async def subscribe(self, channel_name, url):
-        """订阅流"""
-        if channel_name not in self.streams:
-            self.streams[channel_name] = {
+    async def subscribe(self, name, url):
+        # 使用 URL 的哈希作为唯一标识，避免同名冲突
+        stream_id = hashlib.md5(url.encode()).hexdigest()
+        
+        if stream_id not in self.streams:
+            self.streams[stream_id] = {
+                "name": name,
                 "queues": [],
-                "task": asyncio.create_task(self._fetcher(channel_name, url)),
                 "info": {"res": "探测中...", "codec": "探测中..."},
-                "speed": "0 KB/s"
+                "speed": "0 KB/s",
+                "task": asyncio.create_task(self._fetcher(stream_id, url))
             }
         
-        queue = asyncio.Queue(maxsize=50) # 缓冲区队列
-        self.streams[channel_name]["queues"].append(queue)
-        
+        queue = asyncio.Queue(maxsize=100)
+        self.streams[stream_id]["queues"].append(queue)
         try:
             while True:
                 chunk = await queue.get()
                 yield chunk
         finally:
-            # 离开时移除队列
-            if channel_name in self.streams:
-                self.streams[channel_name]["queues"].remove(queue)
+            if stream_id in self.streams:
+                self.streams[stream_id]["queues"].remove(queue)
 
 stream_pool = StreamPool()
 
-# --- 3. 路由设置 ---
+# --- 3. 聚合逻辑：基于 URL 去重 ---
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    with Session(engine) as session:
-        sources = session.exec(select(Source)).all()
+async def fetch_all_channels():
+    """统一获取所有源并去重（基于 URL）"""
+    unique_channels = []
+    seen_urls = set()
     
-    # 转换流状态供前端显示
-    active_info = {
-        name: {
-            "clients": len(data["queues"]),
-            "speed": data["speed"],
-            "info": data["info"]
-        } for name, data in stream_pool.streams.items()
-    }
-    
-    return templates.TemplateResponse("index.html", {
-        "request": request, "sources": sources, "active_streams": active_info
-    })
-
-@app.get("/api/streams")
-async def get_active_streams():
-    return {
-        name: {
-            "clients": len(data["queues"]),
-            "speed": data["speed"],
-            "info": data["info"]
-        } for name, data in stream_pool.streams.items()
-    }
-
-@app.get("/live/{channel_name}")
-async def proxy_live(channel_name: str, url: str):
-    return StreamingResponse(stream_pool.subscribe(channel_name, url), media_type="video/mp2t")
-
-@app.get("/playlist.m3u")
-async def get_m3u(request: Request, proxy: bool = False):
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("host", str(request.base_url.netloc))
-    base_url = f"{scheme}://{host}"
-    
-    channels = {}
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
 
@@ -166,23 +128,37 @@ async def get_m3u(request: Request, proxy: bool = False):
             try:
                 resp = await client.get(source.url)
                 if source.type == 'm3u':
-                    lines = resp.text.split('\n')
-                    for i in range(len(lines)):
-                        if "#EXTINF" in lines[i]:
-                            name = re.search(r',([^,]+)$', lines[i]).group(1).strip()
-                            if i+1 < len(lines):
-                                url = lines[i+1].strip()
-                                if url.startswith("http") and name not in channels:
-                                    channels[name] = url
+                    content = resp.text
+                    # 匹配 #EXTINF 和 URL
+                    pattern = re.compile(r'#EXTINF:-1.*?,(.*?)\n(http.*)')
+                    for name, url in pattern.findall(content):
+                        url = url.strip()
+                        if url not in seen_urls:
+                            unique_channels.append({"name": name.strip(), "url": url})
+                            seen_urls.add(url)
                 else:
                     for line in resp.text.split('\n'):
                         if ',' in line:
-                            name, url = line.split(',', 1)
-                            if name.strip() not in channels: channels[name.strip()] = url.strip()
+                            parts = line.split(',', 1)
+                            name, url = parts[0].strip(), parts[1].strip()
+                            if url not in seen_urls:
+                                unique_channels.append({"name": name, "url": url})
+                                seen_urls.add(url)
             except: continue
+    return unique_channels
 
+# --- 4. 路由设置 ---
+
+@app.get("/playlist.m3u")
+async def get_m3u(request: Request, proxy: bool = False):
+    channels = await fetch_all_channels()
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", str(request.base_url.netloc))
+    base_url = f"{scheme}://{host}"
+    
     output = '#EXTM3U x-tvg-url="https://epg.170909.xyz:1799/t.xml.gz"\n'
-    for name, url in channels.items():
+    for c in channels:
+        name, url = c["name"], c["url"]
         logo = f"https://gcore.jsdelivr.net/gh/taksssss/tv/icon/{name}.png"
         if proxy:
             encoded_url = urllib.parse.quote(url, safe='')
@@ -192,7 +168,46 @@ async def get_m3u(request: Request, proxy: bool = False):
         output += f'#EXTINF:-1 tvg-name="{name}" tvg-logo="{logo}" group-title="聚合频道",{name}\n{final_url}\n'
     return Response(content=output, media_type="application/x-mpegurl")
 
-# 保留之前的 add/delete 路由...
+@app.get("/playlist.txt")
+async def get_txt(request: Request, proxy: bool = False):
+    channels = await fetch_all_channels()
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", str(request.base_url.netloc))
+    base_url = f"{scheme}://{host}"
+    
+    lines = []
+    for c in channels:
+        name, url = c["name"], c["url"]
+        if proxy:
+            encoded_url = urllib.parse.quote(url, safe='')
+            final_url = f"{base_url}/live/{name}?url={encoded_url}"
+        else:
+            final_url = url
+        lines.append(f"{name},{final_url}")
+    return Response(content="\n".join(lines), media_type="text/plain")
+
+@app.get("/live/{channel_name}")
+async def proxy_live(channel_name: str, url: str):
+    return StreamingResponse(stream_pool.subscribe(channel_name, url), media_type="video/mp2t")
+
+@app.get("/api/streams")
+async def get_active_streams():
+    return {
+        # 返回流名称而不是哈希值
+        data["name"]: {
+            "clients": len(data["queues"]),
+            "speed": data["speed"],
+            "info": data["info"]
+        } for stream_id, data in stream_pool.streams.items()
+    }
+
+# --- 基础管理路由 (保持不变) ---
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    with Session(engine) as session:
+        sources = session.exec(select(Source)).all()
+    return templates.TemplateResponse("index.html", {"request": request, "sources": sources})
+
 @app.post("/add_source")
 async def add_source(name: str = Form(...), url: str = Form(...), type: str = Form(...)):
     with Session(engine) as session:
