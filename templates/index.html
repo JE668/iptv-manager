@@ -1,89 +1,123 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>IPTV Manager Dashboard</title>
+    <title>IPTV Manager Pro</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <style>
-        .stats-card { background: #f8f9fa; border-radius: 10px; padding: 15px; margin-bottom: 20px; border-left: 5px solid #0d6efd; }
-        .badge-stream { font-size: 0.8em; }
+        body { background: #f4f7f6; }
+        .card { border: none; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .status-online { color: #28a745; font-weight: bold; }
+        .status-offline { color: #dc3545; font-weight: bold; }
+        .stream-card { border-left: 4px solid #007bff; transition: transform 0.2s; }
+        .stream-card:hover { transform: translateY(-3px); }
     </style>
 </head>
-<body class="container mt-5">
-    <h2 class="mb-4">📺 IPTV 管理面板</h2>
-    
-    <!-- 实时流状态面板 -->
-    <div class="card mb-4">
-        <div class="card-header bg-dark text-white">实时缓冲池监控 (Active Streams)</div>
-        <div class="card-body">
-            <div id="active-streams-list" class="row">
-                <p class="text-muted text-center">当前没有活动的代理流</p>
-            </div>
+<body class="container py-5">
+    <div class="d-flex justify-content-between align-items-center mb-4">
+        <h2>🚀 IPTV 管理控制台</h2>
+        <div id="epg-badge"></div>
+    </div>
+
+    <!-- 1. 实时流监控 -->
+    <div class="mb-5">
+        <h5 class="mb-3">🔥 正在转播的流 (实时)</h5>
+        <div id="active-streams-list" class="row">
+            <div class="col-12 text-center py-4 text-muted">暂无播放请求</div>
         </div>
     </div>
 
     <div class="row">
-        <!-- 订阅管理 -->
-        <div class="col-md-8">
-            <div class="card p-3 mb-4">
-                <h5>添加新订阅源</h5>
-                <form action="/add_source" method="post" class="row g-2">
-                    <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="名称"></div>
-                    <div class="col-md-6"><input type="text" name="url" class="form-control" placeholder="链接"></div>
+        <!-- 2. 订阅管理 -->
+        <div class="col-lg-8">
+            <div class="card p-4 mb-4">
+                <h5 class="card-title">📦 订阅源管理</h5>
+                <form action="/add_source" method="post" class="row g-2 mb-4">
+                    <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="源名称"></div>
+                    <div class="col-md-6"><input type="text" name="url" class="form-control" placeholder="M3U/TXT 链接"></div>
                     <div class="col-md-2"><select name="type" class="form-control"><option value="m3u">M3U</option><option value="txt">TXT</option></select></div>
-                    <div class="col-md-1"><button type="submit" class="btn btn-primary">加</button></div>
+                    <div class="col-md-1"><button type="submit" class="btn btn-primary w-100">Add</button></div>
                 </form>
-            </div>
 
-            <table class="table table-hover">
-                <thead><tr><th>名称</th><th>类型</th><th>操作</th></tr></thead>
-                <tbody>
-                    {% for source in sources %}
-                    <tr><td>{{ source.name }}</td><td>{{ source.type }}</td><td><a href="/delete/{{ source.id }}" class="text-danger">删除</a></td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+                <table class="table align-middle">
+                    <thead><tr><th>源名称</th><th>状态</th><th>最后检测</th><th>操作</th></tr></thead>
+                    <tbody>
+                        {% for s in sources %}
+                        <tr>
+                            <td><strong>{{ s.name }}</strong><br><small class="text-muted">{{ s.url[:40] }}...</small></td>
+                            <td><span class="status-{{ s.status.lower() }}">{{ s.status }}</span></td>
+                            <td><small>{{ "刚刚" if s.last_check > 0 else "待检测" }}</small></td>
+                            <td><a href="/delete/{{ s.id }}" class="btn btn-outline-danger btn-sm">删除</a></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
         </div>
 
-        <!-- 聚合链接 -->
-        <div class="col-md-4">
-            <div class="stats-card">
-                <h6>🔗 聚合订阅地址</h6>
-                <p class="small text-muted">直连模式（不消耗服务器流量）：</p>
-                <code class="d-block mb-3">/playlist.m3u</code>
-                <p class="small text-muted">代理模式（支持缓冲与监控）：</p>
-                <code class="d-block text-primary">/playlist.m3u?proxy=True</code>
+        <!-- 3. 聚合地址链接 -->
+        <div class="col-lg-4">
+            <div class="card p-4 mb-4 bg-dark text-white">
+                <h5>🔗 我的聚合链接</h5>
+                <hr>
+                <p class="mb-1 small">M3U 代理 (推荐):</p>
+                <div class="input-group mb-3">
+                    <input id="link-m3u" class="form-control form-control-sm bg-secondary text-white border-none" readonly>
+                    <button class="btn btn-primary btn-sm" onclick="copy('link-m3u')">复制</button>
+                </div>
+                <p class="mb-1 small">TXT 订阅地址:</p>
+                <div class="input-group">
+                    <input id="link-txt" class="form-control form-control-sm bg-secondary text-white border-none" readonly>
+                    <button class="btn btn-primary btn-sm" onclick="copy('link-txt')">复制</button>
+                </div>
             </div>
         </div>
     </div>
 
     <script>
-        // 定时刷新流状态
-        async function updateStats() {
-            const resp = await fetch('/api/streams');
-            const data = await resp.json();
-            const container = document.getElementById('active-streams-list');
-            
-            if (Object.keys(data).length === 0) {
-                container.innerHTML = '<p class="text-muted text-center">当前没有活动的代理流</p>';
-                return;
-            }
+        function updateLinks() {
+            const base = window.location.origin;
+            document.getElementById('link-m3u').value = base + '/playlist.m3u?proxy=True';
+            document.getElementById('link-txt').value = base + '/playlist.txt?proxy=True';
+        }
 
-            container.innerHTML = Object.entries(data).map(([name, s]) => `
-                <div class="col-md-6 mb-3">
-                    <div class="card shadow-sm p-3">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <strong style="color:#0d6efd">${name}</strong>
-                            <span class="badge bg-success">${s.clients} 人正在观看</span>
-                        </div>
-                        <div class="mt-2 small">
-                            <div>分辨率: <b>${s.info.res}</b> | 编码: <b>${s.info.codec}</b></div>
-                            <div>实时下载网速: <b class="text-danger">${s.speed}</b></div>
+        async function fetchAPI() {
+            const r = await fetch('/api/status');
+            const data = await r.json();
+            
+            // 更新流列表
+            const list = document.getElementById('active-streams-list');
+            if (data.active_streams.length === 0) {
+                list.innerHTML = '<div class="col-12 text-center py-4 text-muted">暂无播放请求</div>';
+            } else {
+                list.innerHTML = data.active_streams.map(s => `
+                    <div class="col-md-4 mb-3">
+                        <div class="card p-3 stream-card">
+                            <div class="d-flex justify-content-between">
+                                <strong>${s.name}</strong>
+                                <span class="badge bg-primary">${s.clients} Clients</span>
+                            </div>
+                            <div class="small mt-2">
+                                ⚡ 网速: <span class="text-danger">${s.speed}</span><br>
+                                📺 规格: ${s.info.res} | ${s.info.codec}
+                            </div>
                         </div>
                     </div>
-                </div>
-            `).join('');
+                `).join('');
+            }
+            // 更新 EPG 状态
+            document.getElementById('epg-badge').innerHTML = `<span class="badge bg-${data.epg_status === 'Loaded' ? 'success' : 'warning'}">EPG: ${data.epg_status}</span>`;
         }
-        setInterval(updateStats, 2000); // 2秒刷新一次
+
+        function copy(id) {
+            const el = document.getElementById(id);
+            el.select();
+            document.execCommand('copy');
+            alert('链接已复制到剪贴板');
+        }
+
+        updateLinks();
+        setInterval(fetchAPI, 3000);
+        fetchAPI();
     </script>
 </body>
 </html>
