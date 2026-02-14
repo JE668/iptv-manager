@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IPTV Manager | NextGen Dashboard</title>
-    <!-- 引入核心样式 -->
+    <!-- 引入核心样式与图标 -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
@@ -15,6 +15,7 @@
             --text-main: #e6edf3;
             --text-muted: #8b949e;
             --border-color: rgba(48, 54, 61, 0.8);
+            --danger-color: #f85149;
         }
 
         body {
@@ -25,9 +26,10 @@
             color: var(--text-main);
             font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
             min-height: 100vh;
+            margin: 0;
         }
 
-        /* 科技感卡片 - 毛玻璃效果 */
+        /* 科技感毛玻璃卡片 */
         .glass-card {
             background: var(--card-bg);
             backdrop-filter: blur(12px);
@@ -38,6 +40,7 @@
             transition: all 0.3s ease;
         }
 
+        /* 导航栏 */
         .navbar {
             background: rgba(10, 12, 16, 0.8);
             backdrop-filter: blur(10px);
@@ -54,6 +57,7 @@
             gap: 10px;
         }
 
+        /* 按钮样式 */
         .btn-glow {
             background: var(--accent-color);
             border: none;
@@ -63,48 +67,75 @@
             box-shadow: 0 0 15px rgba(0, 212, 255, 0.3);
             transition: all 0.3s;
         }
-
         .btn-glow:hover {
             transform: translateY(-2px);
             box-shadow: 0 0 25px rgba(0, 212, 255, 0.5);
             background: #fff;
         }
 
+        /* 输入框样式 */
         .form-control, .form-select {
-            background: rgba(0, 0, 0, 0.2);
+            background: rgba(0, 0, 0, 0.3);
             border: 1px solid var(--border-color);
             color: #fff;
             border-radius: 8px;
         }
-
         .form-control:focus {
-            background: rgba(0, 0, 0, 0.3);
+            background: rgba(0, 0, 0, 0.4);
             border-color: var(--accent-color);
             box-shadow: 0 0 0 0.25rem rgba(0, 212, 255, 0.1);
             color: #fff;
         }
 
+        /* 表格样式 */
         .table { color: var(--text-main); }
         .table thead { color: var(--text-muted); text-transform: uppercase; font-size: 0.75rem; letter-spacing: 1px; }
         .table-hover tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
 
-        /* 状态呼吸灯 */
-        .status-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            display: inline-block;
-            margin-right: 8px;
-        }
-        .dot-online { background: #238636; box-shadow: 0 0 10px #238636; }
-        .dot-offline { background: #da3633; box-shadow: 0 0 10px #da3633; }
-
+        /* 监控条目样式 */
         .stream-item {
             border-bottom: 1px solid var(--border-color);
             padding: 15px 0;
-            transition: all 0.3s;
         }
         .stream-item:last-child { border: none; }
+
+        .upstream-url {
+            font-size: 0.65rem;
+            color: var(--text-muted);
+            background: rgba(0,0,0,0.4);
+            padding: 6px 10px;
+            border-radius: 6px;
+            display: block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin: 10px 0;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+
+        .client-tag {
+            font-size: 0.65rem;
+            color: #aaa;
+            background: rgba(255,255,255,0.05);
+            padding: 3px 8px;
+            border-radius: 4px;
+            margin-right: 6px;
+            margin-top: 6px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+
+        .badge-tech {
+            background: rgba(0, 212, 255, 0.1);
+            color: var(--accent-color);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.65rem;
+            font-weight: 600;
+        }
 
         .link-copy-box {
             background: #000;
@@ -116,43 +147,15 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            overflow: hidden;
+            border: 1px solid var(--border-color);
         }
 
-        .badge-info-tech {
-            background: rgba(0, 212, 255, 0.1);
-            color: var(--accent-color);
-            border: 1px solid rgba(0, 212, 255, 0.2);
-            padding: 4px 8px;
-            border-radius: 4px;
-            font-size: 0.65rem;
+        /* 呼吸灯 */
+        .status-dot {
+            width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 8px;
         }
-
-        .upstream-url {
-            font-size: 0.65rem;
-            color: var(--text-muted);
-            background: rgba(0,0,0,0.3);
-            padding: 4px 8px;
-            border-radius: 4px;
-            display: block;
-            white-space: nowrap;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            margin: 8px 0;
-        }
-
-        .client-info {
-            font-size: 0.65rem;
-            color: #aaa;
-            background: rgba(255,255,255,0.05);
-            padding: 2px 6px;
-            border-radius: 4px;
-            margin-right: 5px;
-            margin-top: 5px;
-            display: inline-block;
-        }
-
-        #check-status-text { font-size: 0.85rem; color: var(--accent-color); }
+        .dot-online { background: #238636; box-shadow: 0 0 10px #238636; }
+        .dot-offline { background: var(--danger-color); box-shadow: 0 0 10px var(--danger-color); }
     </style>
 </head>
 <body>
@@ -164,30 +167,33 @@
         </a>
         <div class="d-flex align-items-center gap-3">
             <span id="check-status-text" style="display: none;">
-                <span class="spinner-grow spinner-grow-sm me-1"></span> 链路巡检中...
+                <span class="spinner-grow spinner-grow-sm me-1"></span> 巡检中...
             </span>
             <a href="/refresh" class="btn btn-outline-info btn-sm">
-                <i data-lucide="refresh-cw" size="16"></i> 同步云端
+                <i data-lucide="refresh-cw" size="14"></i> 同步云端
+            </a>
+            <a href="/logout" class="btn btn-outline-danger btn-sm">
+                <i data-lucide="log-out" size="14"></i> 退出系统
             </a>
         </div>
     </div>
 </nav>
 
-<div class="container mt-4">
+<div class="container mt-4 pb-5">
     <div class="row g-4">
-        <!-- 左侧：订阅引擎 -->
+        <!-- 左侧：核心管理 -->
         <div class="col-lg-7">
             <div class="glass-card p-4 mb-4">
                 <div class="d-flex align-items-center gap-2 mb-4">
-                    <i data-lucide="plus-square" class="text-info"></i>
-                    <h5 class="m-0">订阅源引擎</h5>
+                    <i data-lucide="plus-circle" class="text-info"></i>
+                    <h5 class="m-0">新增注入源</h5>
                 </div>
-                <form action="/add_source" method="post" class="row g-3">
+                <form action="/add_source" method="post" class="row g-2">
                     <div class="col-md-3">
-                        <input type="text" name="name" class="form-control" placeholder="源标识" required>
+                        <input type="text" name="name" class="form-control" placeholder="节点名称" required>
                     </div>
                     <div class="col-md-5">
-                        <input type="text" name="url" class="form-control" placeholder="M3U/TXT 订阅链接" required>
+                        <input type="text" name="url" class="form-control" placeholder="订阅链接 (M3U/TXT)" required>
                     </div>
                     <div class="col-md-2">
                         <select name="type" class="form-select">
@@ -202,20 +208,20 @@
             </div>
 
             <div class="glass-card">
-                <div class="p-4 border-bottom border-secondary d-flex justify-content-between align-items-center">
+                <div class="p-4 border-bottom border-secondary d-flex justify-content-between">
                     <div class="d-flex align-items-center gap-2">
-                        <i data-lucide="database" class="text-info"></i>
-                        <h5 class="m-0">活跃存储库</h5>
+                        <i data-lucide="server" class="text-info"></i>
+                        <h5 class="m-0">节点存储库</h5>
                     </div>
                 </div>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle mb-0">
                         <thead>
                             <tr>
-                                <th>源名称</th>
-                                <th>通信状态</th>
-                                <th>同步周期</th>
-                                <th>操作</th>
+                                <th>节点标识</th>
+                                <th>通信</th>
+                                <th>最后同步</th>
+                                <th>管理</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -223,7 +229,7 @@
                             <tr>
                                 <td>
                                     <div class="fw-bold">{{ s.name }}</div>
-                                    <div class="text-muted small" style="font-size: 0.7rem;">{{ s.url[:50] }}...</div>
+                                    <div class="text-muted" style="font-size: 0.65rem; max-width: 250px; overflow: hidden; text-overflow: ellipsis;">{{ s.url }}</div>
                                 </td>
                                 <td>
                                     <span class="status-dot {{ 'dot-online' if s.status == 'Online' else 'dot-offline' }}"></span>
@@ -231,7 +237,7 @@
                                 </td>
                                 <td class="small text-muted time-ago" data-time="{{ s.last_check }}">-</td>
                                 <td>
-                                    <a href="/delete/{{ s.id }}" class="btn btn-link text-danger p-0" onclick="return confirm('确定移除此源？')">
+                                    <a href="/delete/{{ s.id }}" class="text-danger" onclick="return confirm('确定移除此节点？')">
                                         <i data-lucide="trash-2" size="18"></i>
                                     </a>
                                 </td>
@@ -243,45 +249,45 @@
             </div>
         </div>
 
-        <!-- 右侧：实时监控面板 -->
+        <!-- 右侧：实时数据中心 -->
         <div class="col-lg-5">
             <div class="glass-card p-4 mb-4">
                 <div class="d-flex align-items-center justify-content-between mb-4">
                     <div class="d-flex align-items-center gap-2">
-                        <i data-lucide="gauge" class="text-info"></i>
-                        <h5 class="m-0">实时转播链路</h5>
+                        <i data-lucide="zap" class="text-info"></i>
+                        <h5 class="m-0">活跃转播链路</h5>
                     </div>
                     <span class="badge bg-dark border border-secondary" id="active-count">0</span>
                 </div>
-                <div id="stream-monitor" style="max-height: 500px; overflow-y: auto; padding-right: 5px;">
+                <div id="stream-monitor" style="max-height: 500px; overflow-y: auto;">
                     <div class="text-center py-5 text-muted small">
-                        <i data-lucide="hard-drive" size="32" class="mb-2 opacity-25"></i>
-                        <p>监控待机中...</p>
+                        <i data-lucide="layers" size="32" class="mb-2 opacity-25"></i>
+                        <p>监控中继待机...</p>
                     </div>
                 </div>
             </div>
 
             <div class="glass-card p-4">
                 <div class="d-flex align-items-center gap-2 mb-4">
-                    <i data-lucide="share-2" class="text-info"></i>
-                    <h5 class="m-0">分发中心</h5>
+                    <i data-lucide="radio" class="text-info"></i>
+                    <h5 class="m-0">下行分发</h5>
                 </div>
                 <div class="mb-3">
-                    <label class="small text-muted mb-2 d-block">M3U 聚合订阅 (PROXY)</label>
+                    <label class="small text-muted mb-2 d-block">M3U 聚合订阅 (自动代理)</label>
                     <div class="link-copy-box">
-                        <span id="m3u-link" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%;">...</span>
+                        <span id="m3u-link" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 85%;">...</span>
                         <i data-lucide="copy" size="14" style="cursor:pointer" onclick="copyText('m3u-link')"></i>
                     </div>
                 </div>
                 <div class="mb-3">
-                    <label class="small text-muted mb-2 d-block">TXT 聚合订阅 (PROXY)</label>
+                    <label class="small text-muted mb-2 d-block">TXT 聚合订阅 (自动代理)</label>
                     <div class="link-copy-box">
-                        <span id="txt-link" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 80%;">...</span>
+                        <span id="txt-link" style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 85%;">...</span>
                         <i data-lucide="copy" size="14" style="cursor:pointer" onclick="copyText('txt-link')"></i>
                     </div>
                 </div>
-                <div class="p-2 rounded bg-black small text-muted">
-                    <i data-lucide="info" size="12" class="me-1"></i> EPG 已整合至上述链接
+                <div class="p-2 rounded bg-black small text-muted text-center" style="font-size: 0.7rem;">
+                    <i data-lucide="terminal" size="12" class="me-1"></i> EPG 数据已自动注入分发链路
                 </div>
             </div>
         </div>
@@ -289,18 +295,18 @@
 </div>
 
 <script>
-    // 初始化 Lucide 图标
+    // 初始化 Lucide
     lucide.createIcons();
 
     function updateTimeLabels() {
         const now = Math.floor(Date.now() / 1000);
         document.querySelectorAll('.time-ago').forEach(el => {
             const timestamp = parseFloat(el.getAttribute('data-time'));
-            if (!timestamp || timestamp === 0) { el.innerText = '从未同步'; return; }
+            if (!timestamp || timestamp === 0) { el.innerText = '从未巡检'; return; }
             const diff = now - timestamp;
             if (diff < 60) el.innerText = '刚刚';
-            else if (diff < 3600) el.innerText = Math.floor(diff / 60) + ' 分钟前';
-            else el.innerText = Math.floor(diff / 3600) + ' 小时前';
+            else if (diff < 3600) el.innerText = Math.floor(diff / 60) + 'm ago';
+            else el.innerText = Math.floor(diff / 3600) + 'h ago';
         });
     }
 
@@ -314,55 +320,52 @@
 
             const monitor = document.getElementById('stream-monitor');
             if (data.active_streams.length === 0) {
-                monitor.innerHTML = `<div class="text-center py-5 text-muted small"><i data-lucide="hard-drive" size="32" class="mb-2 opacity-25"></i><p>暂无活跃数据链路</p></div>`;
+                monitor.innerHTML = `<div class="text-center py-5 text-muted small"><i data-lucide="layers" size="32" class="mb-2 opacity-25"></i><p>监控中继待机...</p></div>`;
             } else {
                 monitor.innerHTML = data.active_streams.map(s => `
                     <div class="stream-item">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <div class="fw-bold" style="color:var(--accent-color)">${s.name}</div>
-                            <span class="badge bg-primary" style="font-size:0.6rem; background: rgba(0,212,255,0.2) !important; color:var(--accent-color); border:1px solid var(--accent-color);">${s.client_count} PEERS</span>
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <div class="fw-bold" style="color:var(--accent-color); font-size: 0.95rem;">${s.name}</div>
+                            <span class="badge bg-primary" style="font-size:0.6rem; background: rgba(0,212,255,0.15) !important; color:var(--accent-color); border:1px solid rgba(0,212,255,0.3);">${s.client_count} PEERS</span>
                         </div>
                         
-                        <div class="upstream-url">URL: ${s.url}</div>
+                        <div class="upstream-url">UPSTREAM: ${s.url}</div>
 
                         <div class="d-flex gap-2 mb-2">
-                            <span class="badge-info-tech">${s.info.res}</span>
-                            <span class="badge-info-tech">${s.info.codec}</span>
-                            <span class="ms-auto fw-bold text-danger" style="font-size:0.8rem">${s.speed}</span>
+                            <span class="badge-tech">${s.info.res}</span>
+                            <span class="badge-tech">${s.info.codec}</span>
+                            <span class="ms-auto fw-bold text-danger" style="font-size:0.85rem">${s.speed}</span>
                         </div>
 
-                        <div class="clients-box mt-1">
+                        <div class="clients-list">
                             ${s.clients.map(c => `
-                                <div class="client-info">
-                                    <i data-lucide="user" size="8"></i> ${c.ip} <span class="opacity-50">(${c.start_time})</span>
+                                <div class="client-tag">
+                                    <i data-lucide="user" size="8"></i> ${c.ip} <span style="opacity:0.5">[${c.start_time}]</span>
                                 </div>
                             `).join('')}
                         </div>
                     </div>
                 `).join('');
             }
-            lucide.createIcons();
-        } catch (e) { console.error("Monitor Error:", e); }
+            lucide.createIcons(); // 重新加载动态生成的图标
+        } catch (e) { console.error("API 通信故障:", e); }
     }
 
     function copyText(id) {
         const text = document.getElementById(id).innerText;
         navigator.clipboard.writeText(text).then(() => {
-            const icon = document.querySelector(`#${id} + i`);
-            alert("接入链接已复制到剪贴板");
+            alert("分发链路已复制到剪贴板");
         });
     }
 
-    // 自动适配 HTTPS/HTTP
+    // 适配反代域名
     const base = window.location.origin;
     document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
     document.getElementById('txt-link').innerText = base + '/playlist.txt?proxy=True';
 
-    // 轮询定时器
+    // 启动轮询
     setInterval(updateTimeLabels, 10000);
     setInterval(fetchData, 3000);
-    
-    // 初始执行
     updateTimeLabels();
     fetchData();
 </script>
