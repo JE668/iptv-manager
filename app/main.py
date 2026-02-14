@@ -110,6 +110,9 @@ async def get_active_streams():
 
 @app.get("/live/{channel_name}")
 async def proxy_live(channel_name: str, url: str):
+    """代理播放接口"""
+    # 打印一下，方便在后台日志看 URL 是否正确
+    print(f"Proxying channel: {channel_name} -> {url}")
     return StreamingResponse(stream_generator(channel_name, url), media_type="video/mp2t")
 
 @app.get("/playlist.m3u")
