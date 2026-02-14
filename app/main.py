@@ -26,6 +26,25 @@ class Source(SQLModel, table=True):
     last_check: float = 0
 
 SQLModel.metadata.create_all(engine)
+
+# --- 新增：数据库自动迁移逻辑 ---
+from sqlalchemy import text
+with engine.connect() as conn:
+    # 检查 source 表中是否存在 status 列
+    inspector = conn.execute(text("PRAGMA table_info(source)"))
+    columns = [row[1] for row in inspector]
+    
+    if "status" not in columns:
+        print("🔧 正在升级数据库：添加 status 列")
+        conn.execute(text("ALTER TABLE source ADD COLUMN status VARCHAR DEFAULT 'Unknown'"))
+    
+    if "last_check" not in columns:
+        print("🔧 正在升级数据库：添加 last_check 列")
+        conn.execute(text("ALTER TABLE source ADD COLUMN last_check FLOAT DEFAULT 0"))
+    
+    conn.commit()
+# ----------------------------
+
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
