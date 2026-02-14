@@ -22,10 +22,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # 增加这一步：将用户名转换为小写并存入环境变量
+      - name: Lowercase the repo name
+        run: echo "REPO_NAME=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v4
         with:
           context: .
           push: true
-          # 镜像名字格式：ghcr.io/你的用户名/iptv-manager:latest
-          tags: ghcr.io/${{ github.repository_owner }}/iptv-manager:latest
+          # 使用上面处理好的小写环境变量
+          tags: ghcr.io/${{ env.REPO_NAME }}/iptv-manager:latest
