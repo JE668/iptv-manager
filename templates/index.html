@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>IPTV Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="container mt-5">
+    <h2>IPTV 订阅源管理</h2>
+    
+    <!-- 添加源表单 -->
+    <div class="card p-4 mb-4">
+        <form action="/add_source" method="post" class="row g-3">
+            <div class="col-md-4">
+                <input type="text" name="name" class="form-control" placeholder="源名称" required>
+            </div>
+            <div class="col-md-5">
+                <input type="text" name="url" class="form-control" placeholder="订阅链接 (M3U或TXT)" required>
+            </div>
+            <div class="col-md-2">
+                <select name="type" class="form-control">
+                    <option value="m3u">M3U</option>
+                    <option value="txt">TXT</option>
+                </select>
+            </div>
+            <div class="col-md-1">
+                <button type="submit" class="btn btn-primary">添加</button>
+            </div>
+        </form>
+    </div>
+
+    <!-- 已有源列表 -->
+    <table class="table table-striped">
+        <thead>
+            <tr>
+                <th>名称</th>
+                <th>链接</th>
+                <th>类型</th>
+                <th>操作</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for source in sources %}
+            <tr>
+                <td>{{ source.name }}</td>
+                <td>{{ source.url[:50] }}...</td>
+                <td>{{ source.type }}</td>
+                <td><a href="/delete/{{ source.id }}" class="btn btn-danger btn-sm">删除</a></td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+
+    <hr>
+    <div class="mt-4">
+        <h5>你的聚合链接：</h5>
+        <code>/playlist.m3u</code>
+    </div>
+</body>
+</html>
