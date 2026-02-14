@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Form, Response, Background_Tasks
+from fastapi import FastAPI, Request, Form, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import SQLModel, Field, Session, select, create_engine
@@ -28,7 +28,7 @@ templates = Jinja2Templates(directory="templates")
 
 # --- 2. 流媒体监控与缓冲池逻辑 ---
 
-# 存储当前的流状态：{ channel_name: { clients: 0, speed: 0, info: {}, history_bytes: [] } }
+# 存储当前的流状态
 active_streams = {}
 
 async def get_stream_info(url):
@@ -38,7 +38,6 @@ async def get_stream_info(url):
             'ffprobe', '-v', 'quiet', '-print_format', 'json', 
             '-show_streams', '-select_streams', 'v:0', url
         ]
-        # 设置 5 秒超时，防止卡死
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
         )
@@ -63,12 +62,8 @@ async def stream_generator(channel_name: str, url: str):
             "info": {"res": "检测中...", "codec": "检测中..."},
             "start_time": time.time(), "bytes_count": 0
         }
-        # 异步启动 ffprobe 检测信息
-        async def update_info():
-            info = await get_stream_info(url)
-            if channel_name in active_streams:
-                active_streams[channel_name]["info"] = info
-        asyncio.create_task(update_info())
+        # 启动后台检测
+        asyncio.create_task(update_stream_metadata(channel_name, url))
 
     active_streams[channel_name]["clients"] += 1
     
@@ -77,21 +72,25 @@ async def stream_generator(channel_name: str, url: str):
             async with client.stream("GET", url) as r:
                 start_time = time.time()
                 chunk_counter = 0
-                async for chunk in r.aiter_bytes(chunk_size=1024*64): # 64KB 缓冲
+                async for chunk in r.aiter_bytes(chunk_size=1024*64):
                     chunk_counter += len(chunk)
-                    # 每秒计算一次网速
                     elapsed = time.time() - start_time
                     if elapsed >= 1.0:
                         speed_kb = (chunk_counter / 1024) / elapsed
                         active_streams[channel_name]["speed"] = f"{speed_kb:.1f} KB/s"
                         chunk_counter = 0
                         start_time = time.time()
-                    
                     yield chunk
     finally:
-        active_streams[channel_name]["clients"] -= 1
-        if active_streams[channel_name]["clients"] <= 0:
-            active_streams.pop(channel_name, None)
+        if channel_name in active_streams:
+            active_streams[channel_name]["clients"] -= 1
+            if active_streams[channel_name]["clients"] <= 0:
+                active_streams.pop(channel_name, None)
+
+async def update_stream_metadata(channel_name, url):
+    info = await get_stream_info(url)
+    if channel_name in active_streams:
+        active_streams[channel_name]["info"] = info
 
 # --- 3. 路由设置 ---
 
@@ -107,21 +106,14 @@ async def index(request: Request):
 
 @app.get("/api/streams")
 async def get_active_streams():
-    """给前端 Dashboard 调用的接口，实现不刷新页面更新数据"""
     return active_streams
 
 @app.get("/live/{channel_name}")
 async def proxy_live(channel_name: str, url: str):
-    """代理播放接口"""
     return StreamingResponse(stream_generator(channel_name, url), media_type="video/mp2t")
 
 @app.get("/playlist.m3u")
 async def get_m3u(request: Request, proxy: bool = False):
-    """
-    生成 M3U。
-    如果不带参数，输出原链接。
-    如果访问 /playlist.m3u?proxy=True，则输出代理链接。
-    """
     channels = {}
     base_url = str(request.base_url).rstrip('/')
     with Session(engine) as session:
@@ -135,26 +127,29 @@ async def get_m3u(request: Request, proxy: bool = False):
                     lines = resp.text.split('\n')
                     for i in range(len(lines)):
                         if "#EXTINF" in lines[i]:
-                            name = re.search(r',([^,]+)$', lines[i]).group(1).strip()
-                            url = lines[i+1].strip()
-                            if name not in channels: channels[name] = url
+                            name_match = re.search(r',([^,]+)$', lines[i])
+                            if name_match:
+                                name = name_match.group(1).strip()
+                                if i+1 < len(lines):
+                                    url = lines[i+1].strip()
+                                    if url.startswith("http") and name not in channels:
+                                        channels[name] = url
                 else:
                     for line in resp.text.split('\n'):
                         if ',' in line:
                             name, url = line.split(',', 1)
-                            if name.strip() not in channels: channels[name.strip()] = url.strip()
+                            if name.strip() not in channels: 
+                                channels[name.strip()] = url.strip()
             except: continue
 
     output = '#EXTM3U x-tvg-url="https://epg.170909.xyz:1799/t.xml.gz"\n'
     for name, url in channels.items():
         logo = f"https://gcore.jsdelivr.net/gh/taksssss/tv/icon/{name}.png"
-        # 如果开启代理模式，将 URL 指向本地 /live 接口
         final_url = f"{base_url}/live/{name}?url={url}" if proxy else url
         output += f'#EXTINF:-1 tvg-name="{name}" tvg-logo="{logo}" group-title="聚合频道",{name}\n{final_url}\n'
     
     return Response(content=output, media_type="application/x-mpegurl")
 
-# 保留增删逻辑
 @app.post("/add_source")
 async def add_source(name: str = Form(...), url: str = Form(...), type: str = Form(...)):
     with Session(engine) as session:
