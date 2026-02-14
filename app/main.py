@@ -11,17 +11,16 @@ from datetime import datetime
 from typing import Optional, List
 
 import httpx
-from fastapi import FastAPI, Form, Request, Response
+from fastapi import FastAPI, Form, Request, Response, BackgroundTasks
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import text
 
-# 配置日志
+# --- 1. 配置与日志 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPTV-Manager")
 
-# --- 1. 数据库配置 ---
 DB_FILE = "/app/data/iptv.db"
 os.makedirs("/app/data", exist_ok=True)
 engine = create_engine(f"sqlite:///{DB_FILE}", connect_args={"check_same_thread": False})
@@ -30,13 +29,12 @@ class Source(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     name: str
     url: str
-    type: str
+    type: str  # m3u 或 txt
     status: str = "Unknown"
     last_check: float = 0
 
+# 初始化数据库并自动迁移
 SQLModel.metadata.create_all(engine)
-
-# 自动迁移
 with engine.connect() as conn:
     try:
         inspector = conn.execute(text("PRAGMA table_info(source)"))
@@ -49,29 +47,59 @@ with engine.connect() as conn:
     except Exception as e:
         logger.error(f"Database Migration Error: {e}")
 
-# --- 2. 全局状态 ---
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 LOGO_BASE = "https://gcore.jsdelivr.net/gh/taksssss/tv/icon/"
 
 class GlobalState:
     def __init__(self):
-        self.active_streams = {}
         self.epg_content = b""
         self.is_checking = False
 
 state = GlobalState()
 
-# --- 3. 缓冲池逻辑 ---
+# --- 2. 频道清洗与分组工具 ---
+
+def clean_channel_name(name: str) -> str:
+    """清理频道名称中的冗余词汇"""
+    name = name.upper().replace(" ", "")
+    # 移除常见干扰词
+    patterns = [
+        r"\(.*\)", r"（.*）", r"HD", r"高清", r"超清", r"4K", r"8K", r"蓝光", 
+        r"V2", r"V3", r"\(备用\)", r"\[.*\]", r"频道", r"-"
+    ]
+    for p in patterns:
+        name = re.sub(p, "", name)
+    # 规范化 CCTV
+    name = re.sub(r"CCTV(\d+)\+", r"CCTV\1+", name)
+    return name.strip()
+
+def get_auto_group(name: str, original_group: str = "") -> str:
+    """根据名称自动识别分组"""
+    if original_group and original_group not in ["", "未分类", "聚合频道"]:
+        return original_group
+    
+    name = name.upper()
+    if "CCTV" in name: return "央视频道"
+    if "卫视" in name: return "卫视频道"
+    if any(x in name for x in ["电影", "影院", "HBO", "剧场"]): return "电影频道"
+    if any(x in name for x in ["体育", "足球", "篮球", "NBA"]): return "体育频道"
+    if any(x in name for x in ["少儿", "卡通", "动漫"]): return "少儿频道"
+    if any(x in name for x in ["新闻", "资讯"]): return "新闻频道"
+    if any(x in name for x in ["购物", "商城"]): return "购物频道"
+    return "地方频道"
+
+# --- 3. 缓冲池逻辑 (一拉多 & 自愈) ---
+
 class StreamPool:
     def __init__(self):
-        self.streams = {}
+        self.streams = {} # {stream_id: {data}}
 
     async def get_stream_info(self, url: str):
         try:
             cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             data = json.loads(stdout)
             if 'streams' in data and len(data['streams']) > 0:
                 s = data['streams'][0]
@@ -88,7 +116,8 @@ class StreamPool:
                 if retry_count == 0:
                     self.streams[stream_id]["info"] = await self.get_stream_info(url)
                 
-                async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, read=10.0), follow_redirects=True) as client:
+                timeout = httpx.Timeout(10.0, read=10.0)
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                     async with client.stream("GET", url) as r:
                         if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
                         retry_count = 0
@@ -102,14 +131,15 @@ class StreamPool:
                                 if stream_id in self.streams:
                                     self.streams[stream_id]["speed"] = f"{speed:.1f} KB/s"
                                 bytes_count, start_time = 0, now
+                            
                             if not self.streams[stream_id]["queues"]: return
                             for q in self.streams[stream_id]["queues"]:
                                 try: q.put_nowait(chunk)
                                 except asyncio.QueueFull: pass
-            except Exception as e:
+            except Exception:
                 retry_count += 1
                 if stream_id in self.streams: self.streams[stream_id]["speed"] = f"重连中({retry_count})"
-                if retry_count > 15: break
+                if retry_count > 20: break
                 await asyncio.sleep(2)
         self.streams.pop(stream_id, None)
 
@@ -126,15 +156,16 @@ class StreamPool:
                 chunk = await queue.get()
                 yield chunk
         finally:
-            if stream_id in self.streams: self.streams[stream_id]["queues"].remove(queue)
+            if stream_id in self.streams:
+                self.streams[stream_id]["queues"].remove(queue)
 
 stream_pool = StreamPool()
 
-# --- 4. 后台维护逻辑 ---
+# --- 4. 聚合维护任务 ---
+
 async def run_maintenance():
     if state.is_checking: return
     state.is_checking = True
-    logger.info("Starting maintenance task...")
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         with Session(engine) as session:
             sources = session.exec(select(Source)).all()
@@ -150,9 +181,7 @@ async def run_maintenance():
             r = await client.get("https://epg.170909.xyz:1799/t.xml.gz")
             if r.status_code == 200:
                 state.epg_content = gzip.decompress(r.content)
-                logger.info("EPG Cached successfully.")
-        except Exception as e:
-            logger.error(f"EPG Update Failed: {e}")
+        except: pass
     state.is_checking = False
 
 async def maintenance_loop():
@@ -164,87 +193,77 @@ async def maintenance_loop():
 async def startup_event():
     asyncio.create_task(maintenance_loop())
 
-# --- 5. 路由 ---
+# --- 5. 核心路由 ---
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    try:
-        with Session(engine) as session:
-            sources = session.exec(select(Source)).all()
-        return templates.TemplateResponse("index.html", {"request": request, "sources": sources})
-    except Exception as e:
-        return HTMLResponse(content=f"Error: {e}", status_code=500)
-
-@app.get("/refresh")
-async def manual_refresh():
-    logger.info("Manual refresh triggered.")
-    asyncio.create_task(run_maintenance())
-    return RedirectResponse(url="/", status_code=303)
+    with Session(engine) as session:
+        sources = session.exec(select(Source)).all()
+    return templates.TemplateResponse("index.html", {"request": request, "sources": sources})
 
 @app.get("/playlist.m3u")
-async def get_m3u(request: Request, proxy: bool = False):
-    try:
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("host", str(request.base_url.netloc))
-        base_url = f"{scheme}://{host}"
-        
-        unique_channels = []
-        seen_urls = set()
-        
-        with Session(engine) as session:
-            sources = session.exec(select(Source)).all()
+@app.get("/playlist.txt")
+async def get_playlist(request: Request, proxy: bool = False):
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", str(request.base_url.netloc))
+    base_url = f"{scheme}://{host}"
+    
+    unique_channels = []
+    seen_urls = set()
+    
+    with Session(engine) as session:
+        sources = session.exec(select(Source)).all()
 
-        async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-            for s in sources:
-                try:
-                    resp = await client.get(s.url)
-                    lines = resp.text.split('\n')
-                    if s.type == 'm3u':
-                        for i in range(len(lines)):
-                            line = lines[i].strip()
-                            if line.startswith("#EXTINF"):
-                                name = line.split(',')[-1].strip()
-                                # 寻找下一行非空的 URL
-                                for j in range(i + 1, len(lines)):
-                                    next_line = lines[j].strip()
-                                    if next_line.startswith("http"):
-                                        if next_line not in seen_urls:
-                                            unique_channels.append({"name": name, "url": next_line, "group": "聚合频道"})
-                                            seen_urls.add(next_line)
-                                        break
-                    else: # txt
-                        for line in lines:
-                            if ',' in line:
-                                name, url = line.split(',', 1)
-                                if url.strip() not in seen_urls:
-                                    unique_channels.append({"name": name.strip(), "url": url.strip(), "group": "聚合频道"})
-                                    seen_urls.add(url.strip())
-                except Exception as e:
-                    logger.warning(f"Failed to parse source {s.name}: {e}")
-                    continue
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        for s in sources:
+            try:
+                resp = await client.get(s.url)
+                lines = resp.text.split('\n')
+                if s.type == 'm3u':
+                    for i in range(len(lines)):
+                        line = lines[i].strip()
+                        if line.startswith("#EXTINF"):
+                            group_match = re.search(r'group-title="(.*?)"', line)
+                            original_group = group_match.group(1) if group_match else ""
+                            raw_name = line.split(',')[-1].strip()
+                            clean_name = clean_channel_name(raw_name)
+                            for j in range(i + 1, min(i + 5, len(lines))):
+                                u = lines[j].strip()
+                                if u.startswith("http"):
+                                    if u not in seen_urls:
+                                        unique_channels.append({"name": clean_name, "url": u, "group": get_auto_group(clean_name, original_group)})
+                                        seen_urls.add(u)
+                                    break
+                else:
+                    for line in lines:
+                        if ',' in line:
+                            raw_name, url = line.split(',', 1)
+                            clean_name = clean_channel_name(raw_name.strip())
+                            u = url.strip()
+                            if u not in seen_urls:
+                                unique_channels.append({"name": clean_name, "url": u, "group": get_auto_group(clean_name)})
+                                seen_urls.add(u)
+            except: continue
 
+    unique_channels.sort(key=lambda x: (x['group'], x['name']))
+    is_txt = request.url.path.endswith('.txt')
+
+    if is_txt:
+        lines, current_group = [], ""
+        for c in unique_channels:
+            if c['group'] != current_group:
+                current_group = c['group']
+                lines.append(f"{current_group},#genre#")
+            final_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if proxy else c['url']
+            lines.append(f"{c['name']},{final_url}")
+        return Response(content="\n".join(lines), media_type="text/plain")
+    else:
         output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml"\n'
         for c in unique_channels:
             logo = f"{LOGO_BASE}{c['name']}.png"
             final_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if proxy else c['url']
             output += f'#EXTINF:-1 tvg-name="{c["name"]}" tvg-logo="{logo}" group-title="{c["group"]}",{c["name"]}\n{final_url}\n'
         return Response(content=output, media_type="application/x-mpegurl")
-    except Exception as e:
-        logger.error(f"M3U Generation Error: {e}")
-        return Response(content=f"Internal Error: {e}", status_code=500)
-
-@app.get("/playlist.txt")
-async def get_txt(request: Request, proxy: bool = False):
-    # 复用逻辑... (简化处理)
-    resp = await get_m3u(request, proxy)
-    if resp.status_code != 200: return resp
-    lines = []
-    # 从 M3U 转回 TXT
-    m3u_text = resp.body.decode()
-    items = re.findall(r'#EXTINF:.*?,(.*?)\n(http.*)', m3u_text)
-    for name, url in items:
-        lines.append(f"{name},{url}")
-    return Response(content="\n".join(lines), media_type="text/plain")
 
 @app.get("/live/{channel_name}")
 async def proxy_live(channel_name: str, url: str):
@@ -259,10 +278,7 @@ async def get_epg():
 @app.get("/api/status")
 async def get_api_status():
     return {
-        "active_streams": [
-            {"name": v["name"], "clients": len(v["queues"]), "speed": v["speed"], "info": v["info"]}
-            for v in stream_pool.streams.values()
-        ],
+        "active_streams": [{"name": v["name"], "clients": len(v["queues"]), "speed": v["speed"], "info": v["info"]} for v in stream_pool.streams.values()],
         "is_checking": state.is_checking
     }
 
@@ -278,7 +294,11 @@ async def add_source(name: str = Form(...), url: str = Form(...), type: str = Fo
 async def delete_source(source_id: int):
     with Session(engine) as session:
         source = session.get(Source, source_id)
-        if source:
-            session.delete(source)
-            session.commit()
+        if source: session.delete(source)
+        session.commit()
+    return RedirectResponse(url="/", status_code=303)
+
+@app.get("/refresh")
+async def manual_refresh():
+    asyncio.create_task(run_maintenance())
     return RedirectResponse(url="/", status_code=303)
