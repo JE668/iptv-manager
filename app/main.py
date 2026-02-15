@@ -1,180 +1,351 @@
-<!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>IPTV BI Dashboard</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
-    <script src="https://unpkg.com/lucide@latest"></script>
-    <style>
-        :root { --bi-blue: #007aff; --bi-bg: #f5f5f7; --card-bg: #ffffff; }
-        body { background-color: var(--bi-bg); font-family: 'Inter', system-ui, sans-serif; padding: 20px; color: #1d1d1f; }
-        .kpi-card { background: #fff; border-radius: 18px; padding: 20px; border: 1px solid #d2d2d7; text-align: center; }
-        .kpi-val { font-size: 1.8rem; font-weight: 800; color: var(--bi-blue); }
-        .kpi-label { font-size: 0.7rem; color: #86868b; text-transform: uppercase; font-weight: 600; margin-top: 5px; }
-        .glass-card { background: #fff; border-radius: 20px; padding: 25px; border: 1px solid #d2d2d7; box-shadow: 0 4px 12px rgba(0,0,0,0.02); margin-bottom: 1.5rem; }
-        .stream-item { border: 1px solid #e5e5e7; border-radius: 14px; padding: 15px; margin-bottom: 15px; background: #fff; transition: all 0.3s; }
-        .stream-item:hover { border-color: var(--bi-blue); }
-        .progress { height: 6px; border-radius: 10px; background: #f5f5f7; }
-        .speed-tag { font-size: 0.75rem; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
-        .in-speed { color: #007aff; } .out-speed { color: #ff9500; }
-        .client-info { font-size: 0.65rem; color: #86868b; background: #f5f5f7; padding: 2px 6px; border-radius: 4px; display: inline-block; margin: 2px; }
-        .link-box { background: #f9fafb; border: 1px dashed #d2d2d7; padding: 12px; border-radius: 12px; font-size: 0.75rem; font-family: monospace; word-break: break-all; color: #555; }
-        #log-container { font-family: monospace; font-size: 0.8rem; height: 350px; overflow-y: auto; background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 12px; }
-    </style>
-</head>
-<body>
+import asyncio
+import hashlib
+import json
+import os
+import re
+import time
+import urllib.parse
+import gzip
+import logging
+from datetime import datetime, timedelta
+from typing import Optional, List, Dict
 
-<div class="container-fluid">
-    <!-- Header -->
-    <div class="d-flex justify-content-between align-items-center mb-4">
-        <h4 class="fw-bold">☁️ IPTV 中继控制台</h4>
-        <div class="d-flex gap-2">
-            <button class="btn btn-dark btn-sm rounded-pill px-3" data-bs-toggle="modal" data-bs-target="#logModal">📜 更新日志</button>
-            <a href="/refresh" class="btn btn-outline-primary btn-sm rounded-pill px-3">🔄 同步EPG</a>
-            <a href="/logout" class="btn btn-outline-danger btn-sm rounded-pill px-3">🚪 退出</a>
-        </div>
-    </div>
+import httpx
+from fastapi import FastAPI, Form, Request, Response, BackgroundTasks, HTTPException
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
+from fastapi.templating import Jinja2Templates
+from sqlmodel import Field, Session, SQLModel, create_engine, select
+from sqlalchemy import text
+from lxml import etree
 
-    <!-- KPI Section -->
-    <div class="row g-3 mb-4">
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-streams">0</div><div class="kpi-label">📺 活跃链路</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-peers">0</div><div class="kpi-label">👥 在线观众</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-in">0</div><div class="kpi-label">📥 上游入流</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-out">0</div><div class="kpi-label">📤 下游吞吐</div></div></div>
-    </div>
+# --- 1. 配置与日志 ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("IPTV-Manager")
 
-    <div class="row g-4">
-        <div class="col-lg-8">
-            <!-- 全局策略 -->
-            <div class="glass-card">
-                <div class="fw-bold mb-3">⚙️ 全局配置</div>
-                <form action="/update_global_settings" method="post" class="row align-items-end g-3">
-                    <div class="col-md-5">
-                        <label class="small text-muted mb-1">代理策略</label>
-                        <select name="proxy_mode" class="form-select">
-                            <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>全部直连 (带宽0占用)</option>
-                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>按需代理 (udpxy优先)</option>
-                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>全量中继 (保护原始URL)</option>
-                        </select>
-                    </div>
-                    <div class="col-md-3">
-                        <label class="small text-muted mb-1">EPG范围(天)</label>
-                        <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control">
-                    </div>
-                    <div class="col-md-2">
-                        <button type="submit" class="btn btn-primary w-100">保存设置</button>
-                    </div>
-                </form>
-            </div>
+ADMIN_USER = os.getenv("ADMIN_USER", "admin")
+ADMIN_PASS = os.getenv("ADMIN_PASS", "admin123")
+SECRET_KEY = hashlib.sha256(ADMIN_PASS.encode()).hexdigest()
 
-            <!-- 视频源 -->
-            <div class="glass-card">
-                <div class="fw-bold mb-3">📡 视频订阅矩阵</div>
-                <form action="/add_source" method="post" class="row g-2 mb-4">
-                    <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="标识名称" required></div>
-                    <div class="col-md-5"><input type="text" name="url" class="form-control" placeholder="M3U/TXT URL" required></div>
-                    <div class="col-md-2"><select name="type" class="form-select"><option value="m3u">M3U</option><option value="txt">TXT</option></select></div>
-                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">✨ 注入</button></div>
-                </form>
-                <div class="table-responsive">
-                    <table class="table table-hover align-middle small mb-0">
-                        <thead class="text-muted"><tr><th>标识</th><th>类型</th><th>操作</th></tr></thead>
-                        <tbody>
-                            {% for s in sources %}
-                            <tr><td><strong>{{ s.name }}</strong></td><td>{{ s.type.upper() }}</td><td><a href="/delete/{{s.id}}" class="text-danger">移除</a></td></tr>
-                            {% endfor %}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
+DB_FILE = "/app/data/iptv.db"
+os.makedirs("/app/data", exist_ok=True)
+engine = create_engine(f"sqlite:///{DB_FILE}", connect_args={"check_same_thread": False})
 
-            <!-- EPG源 -->
-            <div class="glass-card">
-                <div class="fw-bold mb-3">📅 EPG 节目单源</div>
-                <form action="/add_epg_source" method="post" class="row g-2 mb-4">
-                    <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="EPG源名" required></div>
-                    <div class="col-md-6"><input type="text" name="url" class="form-control" placeholder="XML/GZ URL" required></div>
-                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">✨ 注入</button></div>
-                </form>
-                <table class="table table-hover align-middle small mb-0">
-                    <tbody>
-                        {% for e in epg_sources %}
-                        <tr><td>{{ e.name }}</td><td><span class="badge bg-{{'success' if e.status=='Success' else 'danger'}}">{{ e.status }}</span></td><td><a href="/delete_epg/{{e.id}}" class="text-danger">移除</a></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-        </div>
+class Source(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    url: str
+    type: str 
+    status: str = "Unknown"
+    last_check: float = 0
 
-        <div class="col-lg-4">
-            <!-- 监控 -->
-            <div class="glass-card">
-                <div class="d-flex justify-content-between mb-4 align-items-center">
-                    <h5 class="fw-bold m-0">🔥 活跃数据链路</h5>
-                    <i data-lucide="activity" class="text-primary"></i>
-                </div>
-                <div id="stream-monitor"><div class="text-center py-5 text-muted small">链路待机中...</div></div>
-            </div>
+class EPGSource(SQLModel, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    url: str
+    status: str = "Unknown"
 
-            <!-- 订阅链接 -->
-            <div class="glass-card">
-                <div class="fw-bold mb-3">📋 分发中心</div>
-                <div class="mb-4">
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">M3U 聚合订阅</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
-                    <div class="link-box" id="m3u-link">加载中...</div>
-                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('m3u-link')">📋 复制地址</button>
-                </div>
-                <div>
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">EPG 地址 (.gz)</label><span id="epg-time-display" style="font-size:0.6rem; color:#888">同步: --</span></div>
-                    <div class="link-box" id="epg-gz-link">加载中...</div>
-                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('epg-gz-link')">📋 复制地址</button>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
+class Setting(SQLModel, table=True):
+    key: str = Field(primary_key=True)
+    value: str
 
-<div class="modal fade" id="logModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">📜 EPG 聚合日志</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div id="log-container">暂无日志内容...</div></div></div></div></div>
+SQLModel.metadata.create_all(engine)
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-    lucide.createIcons();
-    const base = window.location.origin;
+# 初始化设置
+with Session(engine) as session:
+    if not session.get(Setting, "epg_days"): session.add(Setting(key="epg_days", value="3"))
+    if not session.get(Setting, "proxy_mode"): session.add(Setting(key="proxy_mode", value="1"))
+    if not session.get(Setting, "epg_interval"): session.add(Setting(key="epg_interval", value="6"))
+    session.commit()
 
-    async function fetchData() {
-        try {
-            const res = await fetch('/api/status');
-            const data = await res.json();
-            document.getElementById('kpi-streams').innerText = data.kpis.stream_count;
-            document.getElementById('kpi-peers').innerText = data.kpis.peer_count;
-            document.getElementById('kpi-in').innerText = data.kpis.total_in;
-            document.getElementById('kpi-out').innerText = data.kpis.total_out;
-            document.getElementById('m3u-time').innerText = '最后拉取: ' + data.last_m3u;
-            document.getElementById('epg-time-display').innerText = '最后同步: ' + data.last_epg;
+app = FastAPI()
+templates = Jinja2Templates(directory="templates")
+LOGO_BASE = "https://gcore.jsdelivr.net/gh/taksssss/tv/icon/"
 
-            const monitor = document.getElementById('stream-monitor');
-            if (data.active_streams.length === 0) {
-                monitor.innerHTML = '<div class="text-center py-5 text-muted small">所有中继待机中...</div>';
-            } else {
-                monitor.innerHTML = data.active_streams.map(s => `
-                    <div class="stream-item">
-                        <div class="d-flex justify-content-between mb-1"><span class="fw-bold" style="color:var(--bi-blue)">${s.name}</span><span class="badge bg-light text-primary">${s.peers} P</span></div>
-                        <div class="d-flex justify-content-between mb-2 small"><span class="speed-tag in-speed">📥 IN: ${s.in_speed}</span><span class="speed-tag out-speed">📤 OUT: ${s.out_speed}</span></div>
-                        <div class="progress mb-2"><div class="progress-bar bg-primary" style="width: ${s.buffer.split('/')[0]}%"></div></div>
-                        <div class="small text-muted" style="font-size:0.6rem">缓存:${s.buffer} | ${s.info.res} | ${s.info.codec}</div>
-                        <div class="mt-2">${s.clients.map(c => `<span class="client-info">${c.ip}</span>`).join('')}</div>
-                    </div>
-                `).join('');
+class GlobalState:
+    def __init__(self):
+        self.epg_xml = b""
+        self.epg_gz = b""
+        self.last_epg_update = 0
+        self.last_playlist_request = 0
+        self.is_epg_updating = False
+        self.epg_logs = []
+state = GlobalState()
+
+def is_authenticated(request: Request):
+    return request.cookies.get("session_id") == SECRET_KEY
+
+# --- 2. 增强型流中继引擎 ---
+
+class StreamPool:
+    def __init__(self):
+        self.streams: Dict = {}
+
+    async def get_stream_info(self, url: str):
+        try:
+            cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=12.0)
+            data = json.loads(stdout)
+            if 'streams' in data and data['streams']:
+                s = data['streams'][0]
+                return {"res": f"{s.get('width')}x{s.get('height')}", "codec": s.get('codec_name', '未知').upper()}
+        except: pass
+        return {"res": "未知", "codec": "未知"}
+
+    async def _fetcher(self, stream_id: str, url: str, name: str):
+        logger.info(f"🚀 [中继启动] {name}")
+        while stream_id in self.streams:
+            if not self.streams[stream_id]["clients"]:
+                # 没人看，给5秒宽限期，防止播放器重连时的闪断
+                await asyncio.sleep(5)
+                if not self.streams[stream_id]["clients"]:
+                    logger.info(f"👋 [中继停止] {name}")
+                    break
+            
+            try:
+                if self.streams[stream_id]["info"]["res"] == "探测中...":
+                    self.streams[stream_id]["info"] = await self.get_stream_info(url)
+
+                timeout = httpx.Timeout(15.0, read=15.0, connect=15.0)
+                async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+                    async with client.stream("GET", url) as r:
+                        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
+                        
+                        start_time, bytes_in = time.time(), 0
+                        async for chunk in r.aiter_bytes(chunk_size=128*1024):
+                            if not self.streams[stream_id]["clients"]: return
+                            bytes_in += len(chunk)
+                            now = time.time()
+                            if now - start_time >= 1.0:
+                                self.streams[stream_id]["in_speed"] = f"{(bytes_in / 1024 / (now-start_time)):.1f} KB/s"
+                                bytes_in, start_time = 0, now
+                            for q in self.streams[stream_id]["queues"]:
+                                try: q.put_nowait(chunk)
+                                except asyncio.QueueFull: pass
+            except Exception as e:
+                logger.error(f"❌ [中继错误] {name}: {e}")
+                if stream_id in self.streams: self.streams[stream_id]["in_speed"] = "重连中..."
+                await asyncio.sleep(3)
+        self.streams.pop(stream_id, None)
+
+    async def subscribe(self, name: str, url: str, client_ip: str):
+        stream_id = hashlib.md5(url.encode()).hexdigest()
+        client_id = hashlib.md5(f"{client_ip}{time.time()}".encode()).hexdigest()[:8]
+        
+        # 修复 KeyError：在这里立即初始化，而不是等 _fetcher
+        if stream_id not in self.streams:
+            self.streams[stream_id] = {
+                "name": name, "url": url, "queues": [], "clients": {}, 
+                "info": {"res": "探测中...", "codec": "探测中..."},
+                "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0
             }
-            if (data.epg_logs.length > 0) document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
-        } catch(e) {}
+            asyncio.create_task(self._fetcher(stream_id, url, name))
+
+        queue = asyncio.Queue(maxsize=100)
+        self.streams[stream_id]["queues"].append(queue)
+        self.streams[stream_id]["clients"][client_id] = {"ip": client_ip, "out_bytes": 0, "speed": "0 KB/s", "last_ts": time.time()}
+        
+        try:
+            while True:
+                chunk = await queue.get()
+                if stream_id not in self.streams: break
+                
+                c = self.streams[stream_id]["clients"].get(client_id)
+                if c:
+                    c["out_bytes"] += len(chunk)
+                    now = time.time()
+                    if now - c["last_ts"] >= 1.0:
+                        c["speed"] = f"{(c['out_bytes'] / 1024 / (now-c['last_ts'])):.1f} KB/s"
+                        c["out_bytes"], c["last_ts"] = 0, now
+                        # 更新总计下游
+                        total_out = sum([float(cli["speed"].split(' ')[0]) for cli in self.streams[stream_id]["clients"].values()])
+                        self.streams[stream_id]["out_speed"] = f"{total_out:.1f} KB/s"
+                
+                self.streams[stream_id]["buffer_level"] = queue.qsize()
+                yield chunk
+        finally:
+            if stream_id in self.streams:
+                self.streams[stream_id]["queues"].remove(queue)
+                self.streams[stream_id]["clients"].pop(client_id, None)
+
+stream_pool = StreamPool()
+
+# --- 3. EPG & 维护逻辑 ---
+
+async def update_epg_task():
+    if state.is_epg_updating: return
+    state.is_epg_updating = True
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    state.epg_logs.insert(0, f"[{ts}] ⏳ 启动 EPG 聚合...")
+    master_root = etree.Element("tv")
+    with Session(engine) as session:
+        sources = session.exec(select(EPGSource)).all()
+        days_limit = int(session.get(Setting, "epg_days").value)
+    cutoff, end = datetime.now() - timedelta(days=1), datetime.now() + timedelta(days=days_limit)
+    
+    async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        for s in sources:
+            try:
+                r = await client.get(s.url); content = r.content
+                if s.url.endswith(".gz") or content[:2] == b'\x1f\x8b': content = gzip.decompress(content)
+                root = etree.fromstring(content, parser=etree.XMLParser(recover=True))
+                channels = root.xpath("//channel"); progs = root.xpath("//programme")
+                for c in channels: master_root.append(c)
+                v_progs = 0
+                for p in progs:
+                    try:
+                        st = datetime.strptime(p.get("start")[:14], "%Y%m%d%H%M%S")
+                        if cutoff <= st <= end: master_root.append(p); v_progs += 1
+                    except: pass
+                s.status = "Success"
+                state.epg_logs.insert(0, f"[{ts}] ✅ {s.name}: 导入 {len(channels)}频道, {v_progs}节目")
+            except Exception as e:
+                s.status = "Error"
+                state.epg_logs.insert(0, f"[{ts}] ❌ {s.name}: {str(e)}")
+            with Session(engine) as session: session.add(s); session.commit()
+    final = etree.tostring(master_root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+    state.epg_xml, state.epg_gz = final, gzip.compress(final)
+    state.last_epg_update, state.is_epg_updating = time.time(), False
+
+@app.on_event("startup")
+async def on_startup():
+    asyncio.create_task(update_epg_task())
+    async def loop():
+        while True:
+            await asyncio.sleep(3600 * 6); await update_epg_task()
+    asyncio.create_task(loop())
+
+# --- 4. 实时订阅生成 (修复引号语法) ---
+
+async def fetch_realtime_sources(force_proxy: bool = False):
+    unique_channels, seen_urls = [], set()
+    with Session(engine) as session:
+        sources = session.exec(select(Source)).all()
+        p_mode = int(session.get(Setting, "proxy_mode").value)
+    
+    async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
+        tasks = [client.get(s.url) for s in sources]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for i, resp in enumerate(results):
+            if isinstance(resp, Exception): continue
+            lines = resp.text.split('\n')
+            for j in range(len(lines)):
+                line = lines[j].strip()
+                if line.startswith("#EXTINF"):
+                    name = line.split(',')[-1].strip()
+                    for k in range(j+1, min(j+5, len(lines))):
+                        u = lines[k].strip()
+                        if u.startswith("http") and u not in seen_urls:
+                            use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                            unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
+                            seen_urls.add(u); break
+                elif ',' in line and not line.startswith("#"):
+                    parts = line.split(',', 1)
+                    name, u = parts[0].strip(), parts[1].strip()
+                    if u.startswith("http") and u not in seen_urls:
+                        use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                        unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy}); seen_urls.add(u)
+    return unique_channels
+
+# --- 5. 路由 ---
+
+@app.get("/playlist.m3u")
+@app.get("/playlist.txt")
+async def get_playlist(request: Request, proxy: bool = False):
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", str(request.base_url.netloc))
+    base_url = f"{scheme}://{host}"
+    
+    channels = await fetch_realtime_sources(force_proxy=proxy)
+    state.last_playlist_request = time.time()
+    
+    # 修复：分离字符串拼接，避免 f-string 嵌套引号冲突
+    if request.url.path.endswith('.txt'):
+        lines = []
+        for c in channels:
+            p_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+            lines.append(f"{c['name']},{p_url}")
+        return Response(content="\n".join(lines), media_type="text/plain")
+    
+    output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml.gz"\n'
+    for c in channels:
+        logo = f"{LOGO_BASE}{c['name'].upper()}.png"
+        p_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+        output += f'#EXTINF:-1 tvg-logo="{logo}",{c["name"]}\n{p_url}\n'
+    return Response(content=output, media_type="application/x-mpegurl")
+
+@app.get("/live/{channel_name}")
+async def proxy_live(request: Request, channel_name: str, url: str):
+    client_ip = request.headers.get("x-real-ip") or request.client.host
+    headers = {"X-Accel-Buffering": "no", "Cache-Control": "no-cache"}
+    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t", headers=headers)
+
+@app.get("/api/status")
+async def api_status():
+    active = []
+    t_in, t_out, t_peers = 0, 0, 0
+    for s_id, d in stream_pool.streams.items():
+        try: t_in += float(d["in_speed"].split(' ')[0]); t_out += float(d["out_speed"].split(' ')[0])
+        except: pass
+        t_peers += len(d["clients"])
+        active.append({"name": d["name"], "url": d["url"], "in_speed": d["in_speed"], "out_speed": d["out_speed"], "peers": len(d["clients"]), "info": d["info"], "buffer": f"{d['buffer_level']}/100", "clients": list(d["clients"].values())})
+    return {
+        "active_streams": active, "is_checking": state.is_epg_updating,
+        "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "待同步",
+        "last_m3u": time.strftime("%H:%M:%S", time.localtime(state.last_playlist_request)) if state.last_playlist_request else "从无请求",
+        "kpis": {"total_in": f"{t_in:.1f} KB/s", "total_out": f"{t_out:.1f} KB/s", "stream_count": len(active), "peer_count": t_peers},
+        "epg_logs": state.epg_logs
     }
-    function copy(id) { navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("已复制")); }
-    document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
-    document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
-    setInterval(fetchData, 3000); fetchData();
-</script>
-</body>
-</html>
+
+@app.get("/")
+async def index(request: Request):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        return templates.TemplateResponse("index.html", {"request": request, "sources": session.exec(select(Source)).all(), "epg_sources": session.exec(select(EPGSource)).all(), "epg_days": session.get(Setting, "epg_days").value, "proxy_mode": session.get(Setting, "proxy_mode").value})
+
+# 后台基础路由
+@app.get("/login", response_class=HTMLResponse)
+async def l_p(request: Request): return templates.TemplateResponse("login.html", {"request": request})
+@app.post("/login")
+async def l_post(username: str = Form(...), password: str = Form(...)):
+    if username == ADMIN_USER and password == ADMIN_PASS:
+        r = RedirectResponse(url="/", status_code=303); r.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True); return r
+    return RedirectResponse(url="/login?error=1", status_code=303)
+@app.get("/logout")
+async def l_out(): r = RedirectResponse(url="/login", status_code=303); r.delete_cookie("session_id"); return r
+@app.get("/epg.xml")
+async def g_epg(): return Response(content=state.epg_xml, media_type="application/xml")
+@app.get("/epg.xml.gz")
+async def g_epgz(): return Response(content=state.epg_gz, media_type="application/gzip")
+@app.post("/add_source")
+async def a_s(request: Request, name: str = Form(...), url: str = Form(...), type: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session: session.add(Source(name=name, url=url, type=type)); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.get("/delete/{sid}")
+async def d_s(sid: int):
+    with Session(engine) as session:
+        s = session.get(Source, sid); 
+        if s: session.delete(s); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.post("/add_epg_source")
+async def a_e(name: str = Form(...), url: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session: session.add(EPGSource(name=name, url=url)); session.commit()
+    asyncio.create_task(update_epg_task()); return RedirectResponse(url="/", status_code=303)
+@app.get("/delete_epg/{eid}")
+async def d_e(eid: int):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        e = session.get(EPGSource, eid);
+        if e: session.delete(e); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.post("/update_global_settings")
+async def u_g(proxy_mode: str = Form(...), epg_days: str = Form(...)):
+    with Session(engine) as session:
+        pm = session.get(Setting, "proxy_mode"); pm.value = proxy_mode; session.add(pm)
+        ed = session.get(Setting, "epg_days"); ed.value = epg_days; session.add(ed)
+        session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.get("/refresh")
+async def ref(): asyncio.create_task(update_epg_task()); return RedirectResponse(url="/", status_code=303)
