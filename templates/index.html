@@ -19,8 +19,8 @@
         .in-speed { color: #007aff; }
         .out-speed { color: #ff9500; }
         .client-info { font-size: 0.65rem; color: #86868b; background: #f5f5f7; padding: 2px 6px; border-radius: 4px; display: inline-block; margin: 2px; }
-        .link-box { background: #f9fafb; border: 1px dashed #d2d2d7; padding: 10px; border-radius: 12px; font-size: 0.75rem; font-family: monospace; word-break: break-all; }
-        #log-container { font-family: monospace; font-size: 0.8rem; height: 300px; overflow-y: auto; background: #000; color: #0f0; padding: 15px; border-radius: 10px; }
+        .link-box { background: #f9fafb; border: 1px dashed #d2d2d7; padding: 12px; border-radius: 12px; font-size: 0.8rem; font-family: monospace; word-break: break-all; color: #555; position: relative; }
+        #log-container { font-family: monospace; font-size: 0.8rem; height: 350px; overflow-y: auto; background: #000; color: #0f0; padding: 15px; border-radius: 10px; line-height: 1.5; }
     </style>
 </head>
 <body>
@@ -30,23 +30,22 @@
         <h3 class="fw-bold">📊 IPTV 中继数据中心</h3>
         <div class="d-flex gap-2">
             <button class="btn btn-outline-dark btn-sm rounded-pill px-3" data-bs-toggle="modal" data-bs-target="#logModal">📜 更新日志</button>
-            <a href="/refresh" class="btn btn-outline-primary btn-sm rounded-pill px-3">🔄 同步EPG</a>
+            <a href="/refresh" class="btn btn-outline-primary btn-sm rounded-pill px-3">🔄 手动刷新EPG</a>
             <a href="/logout" class="btn btn-outline-danger btn-sm rounded-pill px-3">🚪 退出</a>
         </div>
     </div>
 
     <!-- KPI Section -->
     <div class="row g-3 mb-4">
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-streams">0</div><div class="kpi-label">📺 活跃链路</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-peers">0</div><div class="kpi-label">👥 在线观众</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-in">0</div><div class="kpi-label">📥 上游入流</div></div></div>
-        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-out">0</div><div class="kpi-label">📤 下游吞吐</div></div></div>
+        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-streams">0</div><div class="kpi-label">📺 活跃数据链路</div></div></div>
+        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-peers">0</div><div class="kpi-label">👥 实时在线观众</div></div></div>
+        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-in">0</div><div class="kpi-label">📥 上游入向带宽</div></div></div>
+        <div class="col-md-3"><div class="kpi-card"><div class="kpi-val" id="kpi-out">0</div><div class="kpi-label">📤 下游吞吐量</div></div></div>
     </div>
 
     <div class="row g-4">
         <!-- Main Panel -->
         <div class="col-lg-8">
-            <!-- 1. 全局配置 -->
             <div class="glass-card">
                 <div class="fw-bold mb-3">⚙️ 全局中继策略</div>
                 <form action="/update_global_settings" method="post" class="row align-items-end g-3">
@@ -54,12 +53,12 @@
                         <label class="small text-muted mb-1">代理模式</label>
                         <select name="proxy_mode" class="form-select">
                             <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>🚀 全部直连</option>
-                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>🧠 智能代理 (仅udpxy)</option>
-                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>🛡️ 全量代理</option>
+                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>🧠 智能识别 (udpxy/组播走代理)</option>
+                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>🛡️ 全量中继代理</option>
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="small text-muted mb-1">EPG 天数</label>
+                        <label class="small text-muted mb-1">EPG 保留天数</label>
                         <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control">
                     </div>
                     <div class="col-md-2">
@@ -68,7 +67,6 @@
                 </form>
             </div>
 
-            <!-- 2. 视频源管理 -->
             <div class="glass-card">
                 <div class="fw-bold mb-3">📡 视频订阅矩阵</div>
                 <form action="/add_source" method="post" class="row g-2 mb-4">
@@ -89,9 +87,8 @@
                 </div>
             </div>
 
-            <!-- 3. EPG管理 -->
             <div class="glass-card">
-                <div class="fw-bold mb-3">📅 EPG 节目单源</div>
+                <div class="fw-bold mb-3">📅 EPG 节目单引擎</div>
                 <form action="/add_epg_source" method="post" class="row g-2 mb-4">
                     <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="EPG源名" required></div>
                     <div class="col-md-6"><input type="text" name="url" class="form-control" placeholder="XML/GZ URL" required></div>
@@ -108,36 +105,36 @@
             </div>
         </div>
 
-        <!-- Right Monitor -->
         <div class="col-lg-4">
+            <!-- 实时监控 -->
             <div class="glass-card">
                 <div class="d-flex justify-content-between mb-4 align-items-center">
-                    <h5 class="fw-bold m-0">🔥 活跃数据链路</h5>
+                    <h5 class="fw-bold m-0">🔥 实时转播链路</h5>
                     <i data-lucide="zap" class="text-primary"></i>
                 </div>
                 <div id="stream-monitor"><div class="text-center py-5 text-muted small">链路待机中...</div></div>
             </div>
 
+            <!-- 分发链接 -->
             <div class="glass-card">
-                <div class="fw-bold mb-3">📋 订阅下行链接</div>
-                <div class="mb-3">
-                    <label class="small text-muted mb-1">M3U 聚合订阅</label>
-                    <div class="link-box"><span id="m3u-link">...</span></div>
-                    <button class="btn btn-sm text-primary p-0 mt-1" onclick="copy('m3u-link')">📋 复制</button>
+                <div class="fw-bold mb-3">📋 订阅分发中心</div>
+                <div class="mb-4">
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">M3U 聚合订阅</label><span id="m3u-time" class="small text-muted" style="font-size:0.6rem">拉取: --</span></div>
+                    <div class="link-box" id="m3u-link">加载中...</div>
+                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('m3u-link')">📋 复制订阅地址</button>
                 </div>
-                <div class="mb-3">
-                    <label class="small text-muted mb-1">EPG 地址 (.gz)</label>
-                    <div class="link-box"><span id="epg-gz-link">...</span></div>
-                    <button class="btn btn-sm text-primary p-0 mt-1" onclick="copy('epg-gz-link')">📋 复制</button>
+                <div>
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">EPG 地址 (.gz)</label><span id="epg-time-display" class="small text-muted" style="font-size:0.6rem">同步: --</span></div>
+                    <div class="link-box" id="epg-gz-link">加载中...</div>
+                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('epg-gz-link')">📋 复制 EPG 地址</button>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<!-- Log Modal -->
 <div class="modal fade" id="logModal" tabindex="-1">
-    <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">📜 EPG 聚合日志</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div id="log-container">加载中...</div></div></div></div>
+    <div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">📜 EPG 聚合引擎日志</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div id="log-container">暂无日志内容...</div></div></div></div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
@@ -147,34 +144,45 @@
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
+            
             document.getElementById('kpi-streams').innerText = data.kpis.stream_count;
             document.getElementById('kpi-peers').innerText = data.kpis.peer_count;
             document.getElementById('kpi-in').innerText = data.kpis.total_in;
             document.getElementById('kpi-out').innerText = data.kpis.total_out;
+            document.getElementById('m3u-time').innerText = '最后拉取: ' + data.last_m3u;
+            document.getElementById('epg-time-display').innerText = '最后同步: ' + data.last_epg;
 
             const monitor = document.getElementById('stream-monitor');
             if (data.active_streams.length === 0) {
-                monitor.innerHTML = '<div class="text-center py-5 text-muted small">链路待机中...</div>';
+                monitor.innerHTML = '<div class="text-center py-5 text-muted small">无活动链路，中继待机中...</div>';
             } else {
                 monitor.innerHTML = data.active_streams.map(s => `
                     <div class="stream-item">
                         <div class="d-flex justify-content-between mb-1"><span class="fw-bold" style="color:var(--bi-blue)">${s.name}</span><span class="badge bg-light text-primary rounded-pill">${s.peers} P</span></div>
                         <div class="d-flex justify-content-between mb-2 small"><span class="speed-tag in-speed">📥 IN: ${s.in_speed}</span><span class="speed-tag out-speed">📤 OUT: ${s.out_speed}</span></div>
                         <div class="progress mb-2"><div class="progress-bar bg-primary" style="width: ${s.buffer.split('/')[0]}%"></div></div>
-                        <div class="small text-muted" style="font-size:0.6rem">缓存:${s.buffer} | ${s.info.res}</div>
-                        <div class="mt-2">${s.clients.map(c => `<span class="client-info">${c.ip}</span>`).join('')}</div>
+                        <div class="mt-1">${s.clients.map(c => `<span class="client-info">${c.ip}</span>`).join('')}</div>
                     </div>
                 `).join('');
             }
-            document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
-        } catch(e) {}
+            if (data.epg_logs && data.epg_logs.length > 0) {
+                document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
+            }
+        } catch(e) { console.error(e); }
     }
-    function copy(id) { navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("✅ 已复制")); }
+
+    function copy(id) {
+        const text = document.getElementById(id).innerText;
+        navigator.clipboard.writeText(text).then(() => alert("✅ 已复制到剪贴板"));
+    }
+
+    // 初始化链接
     const base = window.location.origin;
     document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
-    document.getElementById('m3u-link').innerText = base + '/playlist.m3u;
     document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
-    setInterval(fetchData, 3000); fetchData();
+
+    setInterval(fetchData, 3000);
+    fetchData();
 </script>
 </body>
 </html>
