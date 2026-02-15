@@ -18,7 +18,7 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import text
 from lxml import etree
 
-# --- 1. 初始化与配置 ---
+# --- 1. 初始化 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPTV-Manager")
 
@@ -50,7 +50,6 @@ class Setting(SQLModel, table=True):
 
 SQLModel.metadata.create_all(engine)
 
-# 初始化设置
 with Session(engine) as session:
     if not session.get(Setting, "epg_days"): session.add(Setting(key="epg_days", value="3"))
     if not session.get(Setting, "proxy_mode"): session.add(Setting(key="proxy_mode", value="1"))
@@ -74,7 +73,7 @@ state = GlobalState()
 def is_authenticated(request: Request):
     return request.cookies.get("session_id") == SECRET_KEY
 
-# --- 2. 流中继引擎 (BI 监控版) ---
+# --- 2. 缓冲池引擎 ---
 
 class StreamPool:
     def __init__(self):
@@ -94,13 +93,16 @@ class StreamPool:
 
     async def _fetcher(self, stream_id: str, url: str, name: str):
         retry_count = 0
+        logger.info(f"开启上游拉流任务: {name}")
         while stream_id in self.streams:
-            if not self.streams[stream_id]["clients"]: break
+            if not self.streams[stream_id]["clients"]: 
+                logger.info(f"由于无人观看，停止拉流: {name}")
+                break
             try:
                 if retry_count == 0: self.streams[stream_id]["info"] = await self.get_stream_info(url)
                 async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
                     async with client.stream("GET", url) as r:
-                        if r.status_code != 200: raise Exception()
+                        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
                         retry_count = 0
                         start_time, bytes_in = time.time(), 0
                         async for chunk in r.aiter_bytes(chunk_size=128*1024):
@@ -113,10 +115,11 @@ class StreamPool:
                             for q in self.streams[stream_id]["queues"]:
                                 try: q.put_nowait(chunk)
                                 except: pass
-            except:
+            except Exception as e:
                 retry_count += 1
+                logger.warning(f"拉流异常({name}): {e}, 尝试重连 {retry_count}")
                 if stream_id in self.streams: self.streams[stream_id]["in_speed"] = f"重连({retry_count})"
-                if retry_count > 10: break
+                if retry_count > 15: break
                 await asyncio.sleep(2)
         self.streams.pop(stream_id, None)
 
@@ -126,10 +129,12 @@ class StreamPool:
         if stream_id not in self.streams:
             self.streams[stream_id] = {"name": name, "url": url, "queues": [], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0}
             asyncio.create_task(self._fetcher(stream_id, url, name))
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.2)
+        
         queue = asyncio.Queue(maxsize=100)
         self.streams[stream_id]["queues"].append(queue)
         self.streams[stream_id]["clients"][client_id] = {"ip": client_ip, "out_bytes": 0, "speed": "0 KB/s", "last_ts": time.time()}
+        
         try:
             while True:
                 chunk = await queue.get()
@@ -150,33 +155,27 @@ class StreamPool:
 
 stream_pool = StreamPool()
 
-# --- 3. EPG 引擎 ---
-
+# --- 3. EPG 聚合 ---
 async def update_epg_task():
     if state.is_epg_updating: return
     state.is_epg_updating = True
     ts = datetime.now().strftime("%H:%M:%S")
     state.epg_logs.insert(0, f"[{ts}] ⏳ 启动聚合任务...")
-    
     master_root = etree.Element("tv")
     with Session(engine) as session:
         sources = session.exec(select(EPGSource)).all()
         days_limit = int(session.get(Setting, "epg_days").value)
-    
     cutoff = datetime.now() - timedelta(days=1)
     end = datetime.now() + timedelta(days=days_limit)
-    
     async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
         for s in sources:
             try:
-                r = await client.get(s.url)
-                content = r.content
+                r = await client.get(s.url); content = r.content
                 if s.url.endswith(".gz") or content[:2] == b'\x1f\x8b': content = gzip.decompress(content)
                 root = etree.fromstring(content, parser=etree.XMLParser(recover=True))
-                channels = root.xpath("//channel")
-                progs = root.xpath("//programme")
-                v_progs = 0
+                channels = root.xpath("//channel"); progs = root.xpath("//programme")
                 for c in channels: master_root.append(c)
+                v_progs = 0
                 for p in progs:
                     try:
                         st = datetime.strptime(p.get("start")[:14], "%Y%m%d%H%M%S")
@@ -188,24 +187,20 @@ async def update_epg_task():
                 s.status = "Error"
                 state.epg_logs.insert(0, f"[{ts}] ❌ {s.name}: {str(e)}")
             with Session(engine) as session: session.add(s); session.commit()
-    
     final = etree.tostring(master_root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
     state.epg_xml, state.epg_gz = final, gzip.compress(final)
-    state.last_epg_update = time.time()
-    state.is_epg_updating = False
+    state.last_epg_update, state.is_epg_updating = time.time(), False
     state.epg_logs = state.epg_logs[:50]
 
 async def epg_loop():
     while True:
         with Session(engine) as session: interval = int(session.get(Setting, "epg_interval").value)
         await update_epg_task(); await asyncio.sleep(interval * 3600)
-
 @app.on_event("startup")
 async def startup(): asyncio.create_task(epg_loop())
 
-# --- 4. 实时订阅抓取 ---
-
-async def fetch_realtime_sources():
+# --- 4. 实时订阅获取 (核心逻辑修改) ---
+async def fetch_realtime_sources(force_proxy: bool = False):
     unique_channels, seen_urls = [], set()
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
@@ -224,14 +219,15 @@ async def fetch_realtime_sources():
                     for k in range(j+1, min(j+5, len(lines))):
                         u = lines[k].strip()
                         if u.startswith("http") and u not in seen_urls:
-                            use_proxy = (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                            # 判定是否走代理：1.强制参数 2.模式2 3.模式1且匹配关键字
+                            use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
                             unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
                             seen_urls.add(u); break
                 elif ',' in line and not line.startswith("#"):
                     parts = line.split(',', 1)
                     name, u = parts[0].strip(), parts[1].strip()
                     if u not in seen_urls:
-                        use_proxy = (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                        use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
                         unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
                         seen_urls.add(u)
     return unique_channels
@@ -240,26 +236,34 @@ async def fetch_realtime_sources():
 
 @app.get("/playlist.m3u")
 @app.get("/playlist.txt")
-async def get_playlist(request: Request):
+async def get_playlist(request: Request, proxy: bool = False):
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("host", str(request.base_url.netloc))
     base_url = f"{scheme}://{host}"
-    channels = await fetch_realtime_sources()
+    
+    # 这里的 proxy 参数决定是否强制所有频道走代理
+    channels = await fetch_realtime_sources(force_proxy=proxy)
     
     if request.url.path.endswith('.txt'):
         lines = []
         for c in channels:
-            quoted_url = urllib.parse.quote(c['url'], safe='')
-            final_url = f"{base_url}/live/{c['name']}?url={quoted_url}" if c['use_proxy'] else c['url']
-            lines.append(f"{c['name']},{final_url}")
+            url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+            lines.append(f"{c['name']},{url}")
         return Response(content="\n".join(lines), media_type="text/plain")
     
+    # 强制使用本地 EPG
     output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml.gz"\n'
     for c in channels:
         quoted_url = urllib.parse.quote(c['url'], safe='')
         final_url = f"{base_url}/live/{c['name']}?url={quoted_url}" if c['use_proxy'] else c['url']
         output += f'#EXTINF:-1 tvg-logo="{LOGO_BASE}{c["name"].upper()}.png",{c["name"]}\n{final_url}\n'
     return Response(content=output, media_type="application/x-mpegurl")
+
+@app.get("/live/{channel_name}")
+async def proxy_live(request: Request, channel_name: str, url: str):
+    client_ip = request.headers.get("x-real-ip") or request.client.host
+    logger.info(f"收到播放请求: {channel_name} 来自 {client_ip}")
+    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t")
 
 @app.get("/api/status")
 async def get_api_status(request: Request):
@@ -285,17 +289,7 @@ async def get_api_status(request: Request):
         "epg_logs": state.epg_logs
     }
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    with Session(engine) as session:
-        return templates.TemplateResponse("index.html", {
-            "request": request, "sources": session.exec(select(Source)).all(), 
-            "epg_sources": session.exec(select(EPGSource)).all(),
-            "epg_days": session.get(Setting, "epg_days").value,
-            "proxy_mode": session.get(Setting, "proxy_mode").value
-        })
-
+# --- 其他后台路由保持不变 ---
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request): return templates.TemplateResponse("login.html", {"request": request})
 @app.post("/login")
@@ -306,16 +300,18 @@ async def login(username: str = Form(...), password: str = Form(...)):
 @app.get("/logout")
 async def logout():
     resp = RedirectResponse(url="/login", status_code=303); resp.delete_cookie("session_id"); return resp
-@app.get("/live/{channel_name}")
-async def proxy_live(request: Request, channel_name: str, url: str):
-    client_ip = request.headers.get("x-real-ip") or request.client.host
-    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t")
+@app.get("/")
+async def index(request: Request):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        return templates.TemplateResponse("index.html", {"request": request, "sources": session.exec(select(Source)).all(), "epg_sources": session.exec(select(EPGSource)).all(), "epg_days": session.get(Setting, "epg_days").value, "proxy_mode": session.get(Setting, "proxy_mode").value})
 @app.get("/epg.xml")
 async def get_epg(): return Response(content=state.epg_xml, media_type="application/xml")
 @app.get("/epg.xml.gz")
 async def get_epg_gz(): return Response(content=state.epg_gz, media_type="application/gzip")
 @app.post("/add_source")
-async def add_source(name: str = Form(...), url: str = Form(...), type: str = Form(...)):
+async def add_source(request: Request, name: str = Form(...), url: str = Form(...), type: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
     with Session(engine) as session: session.add(Source(name=name, url=url, type=type)); session.commit()
     return RedirectResponse(url="/", status_code=303)
 @app.get("/delete/{sid}")
