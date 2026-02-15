@@ -5,32 +5,34 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>IPTV BI Dashboard</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/lucide@latest"></script>
     <style>
-        :root { --bi-blue: #007aff; --bi-bg: #f5f5f7; }
-        body { background-color: var(--bi-bg); font-family: -apple-system, system-ui, sans-serif; padding: 20px; }
+        :root { --bi-blue: #007aff; --bi-bg: #f5f5f7; --card-bg: #ffffff; }
+        body { background-color: var(--bi-bg); font-family: 'Inter', system-ui, sans-serif; padding: 20px; color: #1d1d1f; }
         .kpi-card { background: #fff; border-radius: 18px; padding: 20px; border: 1px solid #d2d2d7; text-align: center; }
         .kpi-val { font-size: 1.8rem; font-weight: 800; color: var(--bi-blue); }
-        .kpi-label { font-size: 0.75rem; color: #86868b; text-transform: uppercase; font-weight: 600; margin-top: 5px; }
+        .kpi-label { font-size: 0.7rem; color: #86868b; text-transform: uppercase; font-weight: 600; margin-top: 5px; }
         .glass-card { background: #fff; border-radius: 20px; padding: 25px; border: 1px solid #d2d2d7; box-shadow: 0 4px 12px rgba(0,0,0,0.02); margin-bottom: 1.5rem; }
-        .stream-item { border: 1px solid #e5e5e7; border-radius: 14px; padding: 15px; margin-bottom: 15px; background: #fff; }
+        .stream-item { border: 1px solid #e5e5e7; border-radius: 14px; padding: 15px; margin-bottom: 15px; background: #fff; transition: all 0.3s; }
+        .stream-item:hover { border-color: var(--bi-blue); }
         .progress { height: 6px; border-radius: 10px; background: #f5f5f7; }
         .speed-tag { font-size: 0.75rem; font-weight: 700; display: inline-flex; align-items: center; gap: 4px; }
-        .in-speed { color: #007aff; }
-        .out-speed { color: #ff9500; }
+        .in-speed { color: #007aff; } .out-speed { color: #ff9500; }
         .client-info { font-size: 0.65rem; color: #86868b; background: #f5f5f7; padding: 2px 6px; border-radius: 4px; display: inline-block; margin: 2px; }
-        .link-box { background: #f9fafb; border: 1px dashed #d2d2d7; padding: 12px; border-radius: 12px; font-size: 0.8rem; font-family: monospace; word-break: break-all; color: #555; }
-        #log-container { font-family: monospace; font-size: 0.8rem; height: 350px; overflow-y: auto; background: #000; color: #0f0; padding: 15px; border-radius: 10px; }
+        .link-box { background: #f9fafb; border: 1px dashed #d2d2d7; padding: 12px; border-radius: 12px; font-size: 0.75rem; font-family: monospace; word-break: break-all; color: #555; }
+        #log-container { font-family: monospace; font-size: 0.8rem; height: 350px; overflow-y: auto; background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 12px; }
     </style>
 </head>
 <body>
 
 <div class="container-fluid">
+    <!-- Header -->
     <div class="d-flex justify-content-between align-items-center mb-4">
-        <h3 class="fw-bold">📊 IPTV 中继数据中心</h3>
+        <h4 class="fw-bold">☁️ IPTV 中继控制台</h4>
         <div class="d-flex gap-2">
-            <button class="btn btn-outline-dark btn-sm rounded-pill px-3" data-bs-toggle="modal" data-bs-target="#logModal">📜 更新日志</button>
-            <a href="/refresh" class="btn btn-outline-primary btn-sm rounded-pill px-3">🔄 同步EPG数据</a>
+            <button class="btn btn-dark btn-sm rounded-pill px-3" data-bs-toggle="modal" data-bs-target="#logModal">📜 更新日志</button>
+            <a href="/refresh" class="btn btn-outline-primary btn-sm rounded-pill px-3">🔄 同步EPG</a>
             <a href="/logout" class="btn btn-outline-danger btn-sm rounded-pill px-3">🚪 退出</a>
         </div>
     </div>
@@ -44,21 +46,21 @@
     </div>
 
     <div class="row g-4">
-        <!-- Main Panel -->
         <div class="col-lg-8">
+            <!-- 全局策略 -->
             <div class="glass-card">
-                <div class="fw-bold mb-3">⚙️ 全局策略</div>
+                <div class="fw-bold mb-3">⚙️ 全局配置</div>
                 <form action="/update_global_settings" method="post" class="row align-items-end g-3">
                     <div class="col-md-5">
-                        <label class="small text-muted mb-1">代理模式</label>
+                        <label class="small text-muted mb-1">代理策略</label>
                         <select name="proxy_mode" class="form-select">
-                            <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>🚀 全部直连</option>
-                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>🧠 智能代理 (udpxy)</option>
-                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>🛡️ 全量中继代理</option>
+                            <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>全部直连 (带宽0占用)</option>
+                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>按需代理 (udpxy优先)</option>
+                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>全量中继 (保护原始URL)</option>
                         </select>
                     </div>
                     <div class="col-md-3">
-                        <label class="small text-muted mb-1">EPG 天数</label>
+                        <label class="small text-muted mb-1">EPG范围(天)</label>
                         <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control">
                     </div>
                     <div class="col-md-2">
@@ -67,32 +69,36 @@
                 </form>
             </div>
 
+            <!-- 视频源 -->
             <div class="glass-card">
                 <div class="fw-bold mb-3">📡 视频订阅矩阵</div>
                 <form action="/add_source" method="post" class="row g-2 mb-4">
-                    <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="名称" required></div>
-                    <div class="col-md-5"><input type="text" name="url" class="form-control" placeholder="M3U/TXT 链接" required></div>
+                    <div class="col-md-3"><input type="text" name="name" class="form-control" placeholder="标识名称" required></div>
+                    <div class="col-md-5"><input type="text" name="url" class="form-control" placeholder="M3U/TXT URL" required></div>
                     <div class="col-md-2"><select name="type" class="form-select"><option value="m3u">M3U</option><option value="txt">TXT</option></select></div>
-                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">注入</button></div>
+                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">✨ 注入</button></div>
                 </form>
-                <table class="table table-hover align-middle small">
-                    <thead class="text-muted"><tr><th>标识</th><th>类型</th><th>管理</th></tr></thead>
-                    <tbody>
-                        {% for s in sources %}
-                        <tr><td><strong>{{ s.name }}</strong></td><td>{{ s.type.upper() }}</td><td><a href="/delete/{{s.id}}" class="text-danger">移除</a></td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+                <div class="table-responsive">
+                    <table class="table table-hover align-middle small mb-0">
+                        <thead class="text-muted"><tr><th>标识</th><th>类型</th><th>操作</th></tr></thead>
+                        <tbody>
+                            {% for s in sources %}
+                            <tr><td><strong>{{ s.name }}</strong></td><td>{{ s.type.upper() }}</td><td><a href="/delete/{{s.id}}" class="text-danger">移除</a></td></tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
+                </div>
             </div>
 
+            <!-- EPG源 -->
             <div class="glass-card">
-                <div class="fw-bold mb-3">📅 EPG 节目单引擎</div>
+                <div class="fw-bold mb-3">📅 EPG 节目单源</div>
                 <form action="/add_epg_source" method="post" class="row g-2 mb-4">
-                    <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="源名" required></div>
+                    <div class="col-md-4"><input type="text" name="name" class="form-control" placeholder="EPG源名" required></div>
                     <div class="col-md-6"><input type="text" name="url" class="form-control" placeholder="XML/GZ URL" required></div>
-                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">注入</button></div>
+                    <div class="col-md-2"><button type="submit" class="btn btn-primary w-100">✨ 注入</button></div>
                 </form>
-                <table class="table table-hover align-middle small">
+                <table class="table table-hover align-middle small mb-0">
                     <tbody>
                         {% for e in epg_sources %}
                         <tr><td>{{ e.name }}</td><td><span class="badge bg-{{'success' if e.status=='Success' else 'danger'}}">{{ e.status }}</span></td><td><a href="/delete_epg/{{e.id}}" class="text-danger">移除</a></td></tr>
@@ -102,31 +108,35 @@
             </div>
         </div>
 
-        <!-- Right Side -->
         <div class="col-lg-4">
+            <!-- 监控 -->
             <div class="glass-card">
-                <div class="d-flex justify-content-between mb-4 align-items-center"><h5 class="fw-bold m-0">🔥 活跃数据链路</h5><i data-lucide="zap" class="text-primary"></i></div>
+                <div class="d-flex justify-content-between mb-4 align-items-center">
+                    <h5 class="fw-bold m-0">🔥 活跃数据链路</h5>
+                    <i data-lucide="activity" class="text-primary"></i>
+                </div>
                 <div id="stream-monitor"><div class="text-center py-5 text-muted small">链路待机中...</div></div>
             </div>
 
+            <!-- 订阅链接 -->
             <div class="glass-card">
-                <div class="fw-bold mb-3">📋 分发分发中心</div>
+                <div class="fw-bold mb-3">📋 分发中心</div>
                 <div class="mb-4">
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">M3U 订阅</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">M3U 聚合订阅</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
                     <div class="link-box" id="m3u-link">加载中...</div>
-                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('m3u-link')">📋 复制</button>
+                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('m3u-link')">📋 复制地址</button>
                 </div>
-                <div class="mb-2">
+                <div>
                     <div class="d-flex justify-content-between mb-1"><label class="small text-muted">EPG 地址 (.gz)</label><span id="epg-time-display" style="font-size:0.6rem; color:#888">同步: --</span></div>
                     <div class="link-box" id="epg-gz-link">加载中...</div>
-                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('epg-gz-link')">📋 复制</button>
+                    <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copy('epg-gz-link')">📋 复制地址</button>
                 </div>
             </div>
         </div>
     </div>
 </div>
 
-<div class="modal fade" id="logModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">📜 EPG 聚合日志</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div id="log-container">加载中...</div></div></div></div></div>
+<div class="modal fade" id="logModal" tabindex="-1"><div class="modal-dialog modal-lg"><div class="modal-content"><div class="modal-header border-0 pb-0"><h5 class="modal-title fw-bold">📜 EPG 聚合日志</h5><button type="button" class="btn-close" data-bs-dismiss="modal"></button></div><div class="modal-body"><div id="log-container">暂无日志内容...</div></div></div></div></div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
@@ -146,29 +156,25 @@
 
             const monitor = document.getElementById('stream-monitor');
             if (data.active_streams.length === 0) {
-                monitor.innerHTML = '<div class="text-center py-5 text-muted small">链路待机中...</div>';
+                monitor.innerHTML = '<div class="text-center py-5 text-muted small">所有中继待机中...</div>';
             } else {
                 monitor.innerHTML = data.active_streams.map(s => `
                     <div class="stream-item">
-                        <div class="d-flex justify-content-between mb-1"><span class="fw-bold" style="color:var(--bi-blue)">${s.name}</span><span class="badge bg-light text-primary">${s.peers} PEERS</span></div>
+                        <div class="d-flex justify-content-between mb-1"><span class="fw-bold" style="color:var(--bi-blue)">${s.name}</span><span class="badge bg-light text-primary">${s.peers} P</span></div>
                         <div class="d-flex justify-content-between mb-2 small"><span class="speed-tag in-speed">📥 IN: ${s.in_speed}</span><span class="speed-tag out-speed">📤 OUT: ${s.out_speed}</span></div>
                         <div class="progress mb-2"><div class="progress-bar bg-primary" style="width: ${s.buffer.split('/')[0]}%"></div></div>
-                        <div class="mt-1">${s.clients.map(c => `<span class="client-info">${c.ip}</span>`).join('')}</div>
+                        <div class="small text-muted" style="font-size:0.6rem">缓存:${s.buffer} | ${s.info.res} | ${s.info.codec}</div>
+                        <div class="mt-2">${s.clients.map(c => `<span class="client-info">${c.ip}</span>`).join('')}</div>
                     </div>
                 `).join('');
             }
-            document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
+            if (data.epg_logs.length > 0) document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
         } catch(e) {}
     }
-
     function copy(id) { navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("已复制")); }
-    
-    // 初始化显示
     document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
     document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
-    
-    setInterval(fetchData, 3000);
-    fetchData();
+    setInterval(fetchData, 3000); fetchData();
 </script>
 </body>
 </html>
