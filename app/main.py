@@ -18,7 +18,7 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import text
 from lxml import etree
 
-# --- 1. 初始化 ---
+# --- 1. 初始化与配置 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPTV-Manager")
 
@@ -67,14 +67,14 @@ class GlobalState:
         self.epg_gz = b""
         self.last_epg_update = 0
         self.is_epg_updating = False
-        self.epg_logs = [] # 存储更新日志
+        self.epg_logs = []
 
 state = GlobalState()
 
 def is_authenticated(request: Request):
     return request.cookies.get("session_id") == SECRET_KEY
 
-# --- 2. 缓冲池引擎 ---
+# --- 2. 流中继引擎 (BI 监控版) ---
 
 class StreamPool:
     def __init__(self):
@@ -84,7 +84,7 @@ class StreamPool:
         try:
             cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
             data = json.loads(stdout)
             if 'streams' in data and len(data['streams']) > 0:
                 s = data['streams'][0]
@@ -124,7 +124,7 @@ class StreamPool:
         stream_id = hashlib.md5(url.encode()).hexdigest()
         client_id = hashlib.md5(f"{client_ip}{time.time()}".encode()).hexdigest()[:8]
         if stream_id not in self.streams:
-            self.streams[stream_id] = {"name": name, "url": url, "queues": [], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s"}
+            self.streams[stream_id] = {"name": name, "url": url, "queues": [], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0}
             asyncio.create_task(self._fetcher(stream_id, url, name))
             await asyncio.sleep(0.5)
         queue = asyncio.Queue(maxsize=100)
@@ -150,13 +150,13 @@ class StreamPool:
 
 stream_pool = StreamPool()
 
-# --- 3. EPG 聚合逻辑 ---
+# --- 3. EPG 引擎 ---
 
 async def update_epg_task():
     if state.is_epg_updating: return
     state.is_epg_updating = True
-    timestamp = datetime.now().strftime("%H:%M:%S")
-    state.epg_logs.insert(0, f"[{timestamp}] 🚀 启动聚合任务...")
+    ts = datetime.now().strftime("%H:%M:%S")
+    state.epg_logs.insert(0, f"[{ts}] ⏳ 启动聚合任务...")
     
     master_root = etree.Element("tv")
     with Session(engine) as session:
@@ -175,47 +175,41 @@ async def update_epg_task():
                 root = etree.fromstring(content, parser=etree.XMLParser(recover=True))
                 channels = root.xpath("//channel")
                 progs = root.xpath("//programme")
-                
-                valid_progs = 0
-                for channel in channels: master_root.append(channel)
-                for prog in progs:
+                v_progs = 0
+                for c in channels: master_root.append(c)
+                for p in progs:
                     try:
-                        st = datetime.strptime(prog.get("start")[:14], "%Y%m%d%H%M%S")
-                        if cutoff <= st <= end: 
-                            master_root.append(prog)
-                            valid_progs += 1
+                        st = datetime.strptime(p.get("start")[:14], "%Y%m%d%H%M%S")
+                        if cutoff <= st <= end: master_root.append(p); v_progs += 1
                     except: pass
                 s.status = "Success"
-                state.epg_logs.insert(0, f"[{timestamp}] ✅ {s.name}: 导入 {len(channels)} 个频道, {valid_progs} 个节目")
+                state.epg_logs.insert(0, f"[{ts}] ✅ {s.name}: 导入 {len(channels)} 频道, {v_progs} 节目")
             except Exception as e:
                 s.status = "Error"
-                state.epg_logs.insert(0, f"[{timestamp}] ❌ {s.name}: 失败 - {str(e)}")
+                state.epg_logs.insert(0, f"[{ts}] ❌ {s.name}: {str(e)}")
             with Session(engine) as session: session.add(s); session.commit()
     
-    final_xml = etree.tostring(master_root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
-    state.epg_xml = final_xml
-    state.epg_gz = gzip.compress(final_xml)
+    final = etree.tostring(master_root, encoding="UTF-8", xml_declaration=True, pretty_print=True)
+    state.epg_xml, state.epg_gz = final, gzip.compress(final)
     state.last_epg_update = time.time()
     state.is_epg_updating = False
-    state.epg_logs = state.epg_logs[:50] # 仅保留最近50条
+    state.epg_logs = state.epg_logs[:50]
 
-async def epg_maintenance_loop():
+async def epg_loop():
     while True:
-        with Session(engine) as session:
-            interval = int(session.get(Setting, "epg_interval").value)
-        await update_epg_task()
-        await asyncio.sleep(interval * 3600)
+        with Session(engine) as session: interval = int(session.get(Setting, "epg_interval").value)
+        await update_epg_task(); await asyncio.sleep(interval * 3600)
 
 @app.on_event("startup")
-async def startup_event(): asyncio.create_task(epg_maintenance_loop())
+async def startup(): asyncio.create_task(epg_loop())
 
-# --- 4. 实时订阅获取 ---
+# --- 4. 实时订阅抓取 ---
 
 async def fetch_realtime_sources():
     unique_channels, seen_urls = [], set()
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
-        proxy_mode = int(session.get(Setting, "proxy_mode").value)
+        p_mode = int(session.get(Setting, "proxy_mode").value)
     
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         tasks = [client.get(s.url) for s in sources]
@@ -223,28 +217,26 @@ async def fetch_realtime_sources():
         for i, resp in enumerate(results):
             if isinstance(resp, Exception): continue
             lines = resp.text.split('\n')
-            if sources[i].type == 'm3u':
-                for j in range(len(lines)):
-                    line = lines[j].strip()
-                    if line.startswith("#EXTINF"):
-                        raw_name = line.split(',')[-1].strip()
-                        for k in range(j+1, min(j+5, len(lines))):
-                            u = lines[k].strip()
-                            if u.startswith("http") and u not in seen_urls:
-                                use_proxy = (proxy_mode == 2) or (proxy_mode == 1 and ("/udp/" in u or "/rtp/" in u))
-                                unique_channels.append({"name": raw_name, "url": u, "use_proxy": use_proxy})
-                                seen_urls.add(u); break
-            else:
-                for line in lines:
-                    if ',' in line:
-                        name, url = line.split(',', 1); u = url.strip()
-                        if u not in seen_urls:
-                            use_proxy = (proxy_mode == 2) or (proxy_mode == 1 and ("/udp/" in u or "/rtp/" in u))
-                            unique_channels.append({"name": name.strip(), "url": u, "use_proxy": use_proxy})
-                            seen_urls.add(u)
+            for j in range(len(lines)):
+                line = lines[j].strip()
+                if line.startswith("#EXTINF"):
+                    name = line.split(',')[-1].strip()
+                    for k in range(j+1, min(j+5, len(lines))):
+                        u = lines[k].strip()
+                        if u.startswith("http") and u not in seen_urls:
+                            use_proxy = (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                            unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
+                            seen_urls.add(u); break
+                elif ',' in line and not line.startswith("#"):
+                    parts = line.split(',', 1)
+                    name, u = parts[0].strip(), parts[1].strip()
+                    if u not in seen_urls:
+                        use_proxy = (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                        unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
+                        seen_urls.add(u)
     return unique_channels
 
-# --- 5. 路由 ---
+# --- 5. 路由逻辑 ---
 
 @app.get("/playlist.m3u")
 @app.get("/playlist.txt")
@@ -253,11 +245,19 @@ async def get_playlist(request: Request):
     host = request.headers.get("host", str(request.base_url.netloc))
     base_url = f"{scheme}://{host}"
     channels = await fetch_realtime_sources()
+    
     if request.url.path.endswith('.txt'):
-        return Response(content="\n".join([f"{c['name']},{f'{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}' if c['use_proxy'] else c['url']}" for c in channels]), media_type="text/plain")
+        lines = []
+        for c in channels:
+            quoted_url = urllib.parse.quote(c['url'], safe='')
+            final_url = f"{base_url}/live/{c['name']}?url={quoted_url}" if c['use_proxy'] else c['url']
+            lines.append(f"{c['name']},{final_url}")
+        return Response(content="\n".join(lines), media_type="text/plain")
+    
     output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml.gz"\n'
     for c in channels:
-        final_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+        quoted_url = urllib.parse.quote(c['url'], safe='')
+        final_url = f"{base_url}/live/{c['name']}?url={quoted_url}" if c['use_proxy'] else c['url']
         output += f'#EXTINF:-1 tvg-logo="{LOGO_BASE}{c["name"].upper()}.png",{c["name"]}\n{final_url}\n'
     return Response(content=output, media_type="application/x-mpegurl")
 
@@ -267,13 +267,35 @@ async def get_api_status(request: Request):
     active = []
     total_in, total_out, total_peers = 0, 0, 0
     for s_id, data in stream_pool.streams.items():
-        try: total_in += float(data["in_speed"].split(' ')[0]); total_out += float(data["out_speed"].split(' ')[0])
+        try:
+            total_in += float(data["in_speed"].split(' ')[0])
+            total_out += float(data["out_speed"].split(' ')[0])
         except: pass
         total_peers += len(data["clients"])
-        active.append({"name": data["name"], "url": data["url"], "in_speed": data["in_speed"], "out_speed": data["out_speed"], "peers": len(data["clients"]), "info": data["info"], "buffer": f"{data.get('buffer_level', 0)}/100", "clients": list(data["clients"].values())})
-    return {"active_streams": active, "is_checking": state.is_epg_updating, "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "从未更新", "kpis": {"total_in": f"{total_in:.1f} KB/s", "total_out": f"{total_out:.1f} KB/s", "stream_count": len(active), "peer_count": total_peers}, "epg_logs": state.epg_logs}
+        active.append({
+            "name": data["name"], "url": data["url"], "in_speed": data["in_speed"], 
+            "out_speed": data["out_speed"], "peers": len(data["clients"]),
+            "info": data["info"], "buffer": f"{data.get('buffer_level', 0)}/100",
+            "clients": list(data["clients"].values())
+        })
+    return {
+        "active_streams": active, "is_checking": state.is_epg_updating,
+        "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "从未更新",
+        "kpis": {"total_in": f"{total_in:.1f} KB/s", "total_out": f"{total_out:.1f} KB/s", "stream_count": len(active), "peer_count": total_peers},
+        "epg_logs": state.epg_logs
+    }
 
-# --- 后台路由 ---
+@app.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        return templates.TemplateResponse("index.html", {
+            "request": request, "sources": session.exec(select(Source)).all(), 
+            "epg_sources": session.exec(select(EPGSource)).all(),
+            "epg_days": session.get(Setting, "epg_days").value,
+            "proxy_mode": session.get(Setting, "proxy_mode").value
+        })
+
 @app.get("/login", response_class=HTMLResponse)
 async def login_page(request: Request): return templates.TemplateResponse("login.html", {"request": request})
 @app.post("/login")
@@ -282,13 +304,8 @@ async def login(username: str = Form(...), password: str = Form(...)):
         resp = RedirectResponse(url="/", status_code=303); resp.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True); return resp
     return RedirectResponse(url="/login?error=1", status_code=303)
 @app.get("/logout")
-async def logout(): resp = RedirectResponse(url="/login", status_code=303); resp.delete_cookie("session_id"); return resp
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    with Session(engine) as session:
-        return templates.TemplateResponse("index.html", {"request": request, "sources": session.exec(select(Source)).all(), "epg_sources": session.exec(select(EPGSource)).all(), "epg_days": session.get(Setting, "epg_days").value, "proxy_mode": session.get(Setting, "proxy_mode").value})
-
+async def logout():
+    resp = RedirectResponse(url="/login", status_code=303); resp.delete_cookie("session_id"); return resp
 @app.get("/live/{channel_name}")
 async def proxy_live(request: Request, channel_name: str, url: str):
     client_ip = request.headers.get("x-real-ip") or request.client.host
@@ -298,8 +315,7 @@ async def get_epg(): return Response(content=state.epg_xml, media_type="applicat
 @app.get("/epg.xml.gz")
 async def get_epg_gz(): return Response(content=state.epg_gz, media_type="application/gzip")
 @app.post("/add_source")
-async def add_source(request: Request, name: str = Form(...), url: str = Form(...), type: str = Form(...)):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+async def add_source(name: str = Form(...), url: str = Form(...), type: str = Form(...)):
     with Session(engine) as session: session.add(Source(name=name, url=url, type=type)); session.commit()
     return RedirectResponse(url="/", status_code=303)
 @app.get("/delete/{sid}")
@@ -319,8 +335,7 @@ async def del_e(eid: int):
         if e: session.delete(e); session.commit()
     return RedirectResponse(url="/", status_code=303)
 @app.post("/update_global_settings")
-async def update_settings(request: Request, proxy_mode: str = Form(...), epg_days: str = Form(...)):
-    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+async def update_settings(proxy_mode: str = Form(...), epg_days: str = Form(...)):
     with Session(engine) as session:
         pm = session.get(Setting, "proxy_mode"); pm.value = proxy_mode; session.add(pm)
         ed = session.get(Setting, "epg_days"); ed.value = epg_days; session.add(ed)
