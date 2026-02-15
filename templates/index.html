@@ -172,6 +172,7 @@
     function copy(id) { navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("✅ 已复制")); }
     const base = window.location.origin;
     document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
+    document.getElementById('m3u-link').innerText = base + '/playlist.m3u;
     document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
     setInterval(fetchData, 3000); fetchData();
 </script>
