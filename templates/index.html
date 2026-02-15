@@ -183,6 +183,19 @@
 
     setInterval(fetchData, 3000);
     fetchData();
+
+        // --- 修复点：确保变量初始化在最前面 ---
+    const base = window.location.origin;
+    
+    function initLinks() {
+        document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
+        document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
+    }
+
+    // 初始执行一次
+    initLinks();
+    setInterval(fetchData, 3000);
+    fetchData();
 </script>
 </body>
 </html>
