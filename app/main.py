@@ -277,4 +277,106 @@ async def fetch_realtime_sources(force_proxy: bool = False):
 @app.get("/playlist.m3u")
 @app.get("/playlist.txt")
 async def get_playlist(request: Request, proxy: bool = False):
-    scheme = request.headers.get("x-f
+    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("host", str(request.base_url.netloc))
+    base_url = f"{scheme}://{host}"
+    
+    channels = await fetch_realtime_sources(force_proxy=proxy)
+    state.last_playlist_update = time.time()
+    
+    if request.url.path.endswith('.txt'):
+        lines = []
+        for c in channels:
+            q_url = urllib.parse.quote(c['url'], safe='')
+            final_url = f"{base_url}/live/{c['name']}?url={q_url}" if c['use_proxy'] else c['url']
+            lines.append(f"{c['name']},{final_url}")
+        return Response(content="\n".join(lines), media_type="text/plain")
+    
+    output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml.gz"\n'
+    for c in channels:
+        q_url = urllib.parse.quote(c['url'], safe='')
+        final_url = f"{base_url}/live/{c['name']}?url={q_url}" if c['use_proxy'] else c['url']
+        output += f'#EXTINF:-1 tvg-name="{c["name"]}" tvg-logo="{LOGO_BASE}{c["name"].upper()}.png",{c["name"]}\n{final_url}\n'
+    return Response(content=output, media_type="application/x-mpegurl")
+
+@app.get("/live/{channel_name}")
+async def proxy_live(request: Request, channel_name: str, url: str):
+    client_ip = request.headers.get("x-real-ip") or request.client.host
+    logger.info(f"📢 [播放请求] {channel_name} 从 {client_ip} 发起")
+    return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t")
+
+@app.get("/api/status")
+async def get_api_status(request: Request):
+    if not is_authenticated(request): return {"active_streams": []}
+    active = []
+    t_in, t_out, t_peers = 0, 0, 0
+    for s_id, d in stream_pool.streams.items():
+        try:
+            t_in += float(d["in_speed"].split(' ')[0])
+            t_out += float(d["out_speed"].split(' ')[0])
+        except: pass
+        t_peers += len(d["clients"])
+        active.append({
+            "name": d["name"], "url": d["url"], "in_speed": d["in_speed"], 
+            "out_speed": d["out_speed"], "peers": len(d["clients"]),
+            "info": d["info"], "buffer": f"{d['buffer_level']}/100",
+            "clients": list(d["clients"].values())
+        })
+    return {
+        "active_streams": active, "is_checking": state.is_epg_updating,
+        "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "待同步",
+        "last_m3u": time.strftime("%H:%M:%S", time.localtime(state.last_playlist_update)) if state.last_playlist_update else "从未请求",
+        "kpis": {"total_in": f"{t_in:.1f} KB/s", "total_out": f"{t_out:.1f} KB/s", "stream_count": len(active), "peer_count": t_peers},
+        "epg_logs": state.epg_logs
+    }
+
+# --- 其他路由 (保持原样) ---
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request): return templates.TemplateResponse("login.html", {"request": request})
+@app.post("/login")
+async def login(username: str = Form(...), password: str = Form(...)):
+    if username == ADMIN_USER and password == ADMIN_PASS:
+        resp = RedirectResponse(url="/", status_code=303); resp.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True); return resp
+    return RedirectResponse(url="/login?error=1", status_code=303)
+@app.get("/logout")
+async def logout():
+    resp = RedirectResponse(url="/login", status_code=303); resp.delete_cookie("session_id"); return resp
+@app.get("/")
+async def index(request: Request):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session:
+        return templates.TemplateResponse("index.html", {"request": request, "sources": session.exec(select(Source)).all(), "epg_sources": session.exec(select(EPGSource)).all(), "epg_days": session.get(Setting, "epg_days").value, "proxy_mode": session.get(Setting, "proxy_mode").value})
+@app.get("/epg.xml")
+async def get_epg(): return Response(content=state.epg_xml, media_type="application/xml")
+@app.get("/epg.xml.gz")
+async def get_epg_gz(): return Response(content=state.epg_gz, media_type="application/gzip")
+@app.post("/add_source")
+async def add_source(request: Request, name: str = Form(...), url: str = Form(...), type: str = Form(...)):
+    if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
+    with Session(engine) as session: session.add(Source(name=name, url=url, type=type)); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.get("/delete/{sid}")
+async def del_s(sid: int):
+    with Session(engine) as session:
+        s = session.get(Source, sid); 
+        if s: session.delete(s); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.post("/add_epg_source")
+async def add_epg(name: str = Form(...), url: str = Form(...)):
+    with Session(engine) as session: session.add(EPGSource(name=name, url=url)); session.commit()
+    asyncio.create_task(update_epg_task()); return RedirectResponse(url="/", status_code=303)
+@app.get("/delete_epg/{eid}")
+async def del_e(eid: int):
+    with Session(engine) as session:
+        e = session.get(EPGSource, eid);
+        if e: session.delete(e); session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.post("/update_global_settings")
+async def update_settings(proxy_mode: str = Form(...), epg_days: str = Form(...)):
+    with Session(engine) as session:
+        session.get(Setting, "proxy_mode").value = proxy_mode
+        session.get(Setting, "epg_days").value = epg_days
+        session.commit()
+    return RedirectResponse(url="/", status_code=303)
+@app.get("/refresh")
+async def ref(): asyncio.create_task(update_epg_task()); return RedirectResponse(url="/", status_code=303)
