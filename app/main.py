@@ -69,13 +69,13 @@ with Session(engine) as session:
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
-LOGO_BASE = "https://taksssss.github.io/tv/icon/"
+LOGO_BASE = "https://gcore.jsdelivr.net/gh/taksssss/tv/icon/"
 
 class GlobalState:
     def __init__(self):
         self.epg_xml = b""; self.epg_gz = b""; self.last_epg_update = 0; self.last_playlist_request = 0
-        self.is_epg_updating = False; self.epg_logs =[]
-        self.alias_map = {}; self.regex_aliases = []; self.categories =[]; self.channel_to_category = {}
+        self.is_epg_updating = False; self.epg_logs = []
+        self.alias_map = {}; self.regex_aliases = []; self.categories = []; self.channel_to_category = {}
 
 state = GlobalState()
 
@@ -83,7 +83,7 @@ def is_authenticated(request: Request): return request.cookies.get("session_id")
 
 # --- 2. 别名与分类引擎 ---
 def load_alias_and_demo():
-    state.alias_map, state.regex_aliases = {},[]
+    state.alias_map, state.regex_aliases = {}, []
     if os.path.exists("alias.txt"):
         with open("alias.txt", "r", encoding="utf-8") as f:
             for line in f:
@@ -98,7 +98,7 @@ def load_alias_and_demo():
                         except: pass
                     else: state.alias_map[a.upper()] = main_name
 
-    state.categories, state.channel_to_category =[], {}
+    state.categories, state.channel_to_category = [], {}
     if os.path.exists("demo.txt"):
         cur_cat = None
         with open("demo.txt", "r", encoding="utf-8") as f:
@@ -106,7 +106,7 @@ def load_alias_and_demo():
                 line = line.strip()
                 if not line: continue
                 if ",#genre#" in line:
-                    cur_cat = {"name": line.split(",")[0].strip(), "channels":[]}
+                    cur_cat = {"name": line.split(",")[0].strip(), "channels": []}
                     state.categories.append(cur_cat)
                 elif cur_cat:
                     ch = line.strip()
@@ -119,7 +119,7 @@ def get_standard_name(raw_name: str) -> str:
     for pattern, main in state.regex_aliases:
         if pattern.search(raw_name): return main
     clean = raw_name.upper().replace(" ", "")
-    for p in[r"\(.*\)", r"（.*）", r"HD", r"高清", r"超清", r"4K", r"8K", r"蓝光", r"V\d", r"\(备用\)", r"\[.*\]", r"频道", r"-"]:
+    for p in [r"\(.*\)", r"（.*）", r"HD", r"高清", r"超清", r"4K", r"8K", r"蓝光", r"V\d", r"\(备用\)", r"\[.*\]", r"频道", r"-"]:
         clean = re.sub(p, "", clean)
     return clean.strip()
 
@@ -129,7 +129,7 @@ class StreamPool:
 
     async def get_stream_info(self, url: str):
         try:
-            cmd =['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
+            cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
             proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
             data = json.loads(stdout)
@@ -171,7 +171,7 @@ class StreamPool:
         stream_id = hashlib.md5(url.encode()).hexdigest()
         client_id = hashlib.md5(f"{client_ip}{time.time()}".encode()).hexdigest()[:8]
         if stream_id not in self.streams:
-            self.streams[stream_id] = {"name": name, "url": url, "queues":[], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0, "history": deque(maxlen=50)}
+            self.streams[stream_id] = {"name": name, "url": url, "queues": [], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0, "history": deque(maxlen=50)}
             asyncio.create_task(self._fetcher(stream_id, url, name))
             await asyncio.sleep(0.5)
         queue = asyncio.Queue(maxsize=200)
@@ -212,51 +212,56 @@ class StreamPool:
 
 stream_pool = StreamPool()
 
-# --- 4. 自动检测与数据获取引擎 ---
+# --- 4. 源自动检测与数据获取引擎 (修复串台 Bug) ---
 async def fetch_realtime_sources(force_proxy: bool = False):
-    """获取源并自动测活"""
-    unique_channels, seen_urls =[], set()
+    unique_channels, seen_urls = [], set()
     with Session(engine) as session:
         sources = session.exec(select(Source)).all()
         p_mode = int(get_setting(session, "proxy_mode", "1"))
         
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
-        tasks =[client.get(s.url) for s in sources]
+        tasks = [client.get(s.url) for s in sources]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        # 将检测结果写回数据库
         with Session(engine) as db_session:
             for i, resp in enumerate(results):
                 s_db = db_session.get(Source, sources[i].id)
                 s_db.last_check = time.time()
-                
                 if isinstance(resp, Exception) or resp.status_code >= 400:
-                    s_db.status = "Offline"
-                    db_session.add(s_db)
-                    continue
+                    s_db.status = "Offline"; db_session.add(s_db); continue
                 
                 s_db.status = "Online"
                 db_session.add(s_db)
                 
                 lines = resp.text.split('\n')
-                for j in range(len(lines)):
-                    line = lines[j].strip()
-                    if line.startswith("#EXTINF"):
-                        name = line.split(',')[-1].strip()
-                        for k in range(j+1, min(j+5, len(lines))):
-                            u = lines[k].strip()
-                            if u.startswith("http") and u not in seen_urls:
+                if sources[i].type == 'm3u':
+                    current_name = None
+                    for line in lines:
+                        line = line.strip()
+                        if not line: continue
+                        if line.startswith("#EXTINF"):
+                            # 提取频道名称
+                            current_name = line.split(',')[-1].strip()
+                        elif current_name and not line.startswith("#"):
+                            # 严格匹配紧跟在 EXTINF 后的有效链接，修复串台漏洞
+                            u = line
+                            if u not in seen_urls:
                                 use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
-                                unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
-                                seen_urls.add(u); break
-                    elif ',' in line and not line.startswith("#"):
-                        parts = line.split(',', 1)
-                        if len(parts) == 2:
-                            name, u = parts[0].strip(), parts[1].strip()
-                            if u.startswith("http") and u not in seen_urls:
-                                use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
-                                unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
+                                unique_channels.append({"name": current_name, "url": u, "use_proxy": use_proxy})
                                 seen_urls.add(u)
+                            # 获取完一个链接后，立即重置名字，防止空链接时偷取下一个频道
+                            current_name = None
+                else:
+                    for line in lines:
+                        line = line.strip()
+                        if ',' in line and not line.startswith("#"):
+                            parts = line.split(',', 1)
+                            if len(parts) == 2:
+                                name, u = parts[0].strip(), parts[1].strip()
+                                if u and u not in seen_urls:
+                                    use_proxy = force_proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
+                                    unique_channels.append({"name": name, "url": u, "use_proxy": use_proxy})
+                                    seen_urls.add(u)
             db_session.commit()
     return unique_channels
 
@@ -311,7 +316,7 @@ async def startup():
 
 @app.get("/api/status")
 async def api_status():
-    active, total_in, total_out, total_peers =[], 0, 0, 0
+    active, total_in, total_out, total_peers = [], 0, 0, 0
     for s_id, d in list(stream_pool.streams.items()):
         num_c = len(d["clients"])
         if num_c > 0:
@@ -329,7 +334,7 @@ async def get_playlist(request: Request, proxy: bool = False):
     base_url = f"{scheme}://{host}"
     
     raw_channels = await fetch_realtime_sources(force_proxy=proxy)
-    unique_channels =[]
+    unique_channels = []
     
     for c in raw_channels:
         std_name = get_standard_name(c['name'])
@@ -348,7 +353,7 @@ async def get_playlist(request: Request, proxy: bool = False):
     state.last_playlist_request = time.time()
 
     if request.url.path.endswith('.txt'):
-        txt_lines, cur_cat =[], ""
+        txt_lines, cur_cat = [], ""
         for c in unique_channels:
             if c['group'] != cur_cat: cur_cat = c['group']; txt_lines.append(f"{cur_cat},#genre#")
             p_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
@@ -377,16 +382,15 @@ async def index(request: Request):
 
 @app.get("/check_sources")
 async def check_sources_route(request: Request):
-    """手动测活接口"""
     if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    await fetch_realtime_sources() # 执行一次抓取+状态写入
+    await fetch_realtime_sources() 
     return RedirectResponse(url="/", status_code=303)
 
 @app.post("/update_global_settings")
 async def u_g(request: Request, proxy_mode: str = Form(...), epg_days: str = Form(...), buffer_threshold: str = Form(...), buffer_timeout: str = Form(...)):
     if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
     with Session(engine) as session:
-        for k, v in[("proxy_mode", proxy_mode), ("epg_days", epg_days), ("buffer_threshold", buffer_threshold), ("buffer_timeout", buffer_timeout)]:
+        for k, v in [("proxy_mode", proxy_mode), ("epg_days", epg_days), ("buffer_threshold", buffer_threshold), ("buffer_timeout", buffer_timeout)]:
             obj = session.get(Setting, k)
             if obj: obj.value = str(v)
             else: session.add(Setting(key=k, value=str(v)))
@@ -402,10 +406,13 @@ async def login_post(username: str = Form(...), password: str = Form(...)):
     return RedirectResponse(url="/login?error=1", status_code=303)
 @app.get("/logout")
 async def logout(): r = RedirectResponse(url="/login", status_code=303); r.delete_cookie("session_id"); return r
-@app.get("/live/{channel_name}")
+
+# 修复带有斜杠名称频道的路由匹配问题：使用 {channel_name:path}
+@app.get("/live/{channel_name:path}")
 async def proxy_live(request: Request, channel_name: str, url: str):
     client_ip = request.headers.get("x-real-ip") or request.client.host
     return StreamingResponse(stream_pool.subscribe(channel_name, url, client_ip), media_type="video/mp2t", headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"})
+
 @app.get("/epg.xml")
 async def g_epg(): return Response(content=state.epg_xml, media_type="application/xml")
 @app.get("/epg.xml.gz")
