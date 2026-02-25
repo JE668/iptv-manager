@@ -25,7 +25,7 @@
         
         .stream-item { background: #fafafa; border: 1px solid #eee; border-radius: 12px; padding: 15px; margin-bottom: 12px; }
         .upstream-tag { font-size: 0.65rem; color: var(--text-muted); background: #eee; padding: 4px 8px; border-radius: 6px; display: block; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-        .link-copy-group { background: #f5f5f7; border-radius: 10px; padding: 12px; font-size: 0.75rem; border: 1px solid #e5e5e7; word-break: break-all; font-family: monospace; color: #555; }
+        .link-copy-group { background: #f5f5f7; border-radius: 10px; padding: 12px; font-size: 0.75rem; border: 1px dashed #d2d2d7; word-break: break-all; font-family: monospace; color: #555; position: relative; }
         #log-container { font-family: monospace; font-size: 0.8rem; height: 350px; overflow-y: auto; background: #1c1c1e; color: #32d74b; padding: 15px; border-radius: 12px; }
     </style>
 </head>
@@ -35,6 +35,9 @@
     <div class="container">
         <a class="navbar-brand" href="/"><span>☁️</span> IPTV CLEAR</a>
         <div class="d-flex align-items-center gap-2">
+            <span id="check-status-text" class="small text-muted" style="display: none;">
+                <span class="spinner-border spinner-border-sm me-1 text-primary"></span>
+            </span>
             <button class="btn btn-sm btn-outline-dark fw-bold" data-bs-toggle="modal" data-bs-target="#logModal">📜 EPG日志</button>
             <a href="/refresh" class="btn btn-sm btn-outline-primary fw-bold">🔄 同步数据</a>
             <a href="/logout" class="btn btn-sm btn-outline-danger fw-bold">🚪 退出</a>
@@ -52,67 +55,95 @@
 
     <div class="row g-4">
         <div class="col-lg-8">
-            <div class="clean-card">
-                <div class="card-title">⚙️ 全局与缓冲策略</div>
-                <form action="/update_global_settings" method="post" class="row align-items-end g-2">
-                    <div class="col-md-3">
-                        <label class="small text-muted mb-1">代理模式</label>
-                        <select name="proxy_mode" class="form-select form-select-sm">
-                            <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>全部直连</option>
-                            <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>智能(udpxy)</option>
-                            <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>全量代理</option>
-                        </select>
+            <!-- 全局与缓冲策略 -->
+            <div class="clean-card" style="background: linear-gradient(145deg, #ffffff 0%, #f8faff 100%);">
+                <div class="card-title text-primary"><i data-lucide="settings"></i> 全局中继与缓冲引擎配置</div>
+                <form action="/update_global_settings" method="post">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-5">
+                            <label class="small text-muted fw-bold mb-1">代理模式</label>
+                            <select name="proxy_mode" class="form-select form-select-sm shadow-sm">
+                                <option value="0" {% if proxy_mode=='0' %}selected{% endif %}>🚀 全部直连 (带宽0占用)</option>
+                                <option value="1" {% if proxy_mode=='1' %}selected{% endif %}>🧠 智能按需 (udpxy优先)</option>
+                                <option value="2" {% if proxy_mode=='2' %}selected{% endif %}>🛡️ 全量中继 (隐蔽源URL)</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="small text-muted fw-bold mb-1">EPG 天数</label>
+                            <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control form-control-sm shadow-sm">
+                        </div>
                     </div>
-                    <div class="col-md-2">
-                        <label class="small text-muted mb-1" title="保留几天的节目单数据">EPG(天)</label>
-                        <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control form-control-sm">
-                    </div>
-                    <div class="col-md-2">
-                        <label class="small text-muted mb-1" title="每块约128KB。冷启动时，攒够几块才发给播放器。">阈值(块)</label>
-                        <input type="number" name="buffer_threshold" value="{{ buffer_threshold }}" class="form-control form-control-sm">
-                    </div>
-                    <div class="col-md-3">
-                        <label class="small text-muted mb-1" title="如果没有攒够指定的块数，最多等几秒强制发送，防止播放器超时。">限时(秒)</label>
-                        <input type="number" step="0.1" name="buffer_timeout" value="{{ buffer_timeout }}" class="form-control form-control-sm">
-                    </div>
-                    <div class="col-md-2">
-                        <button type="submit" class="btn btn-primary btn-sm w-100">💾 保存</button>
+                    <div class="row g-3 align-items-end">
+                        <div class="col-md-4">
+                            <label class="small text-muted fw-bold mb-1">起播阈值 (数据块)</label>
+                            <div class="input-group input-group-sm shadow-sm">
+                                <input type="number" name="buffer_threshold" value="{{ buffer_threshold }}" class="form-control">
+                                <span class="input-group-text bg-light text-muted">块</span>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="small text-muted fw-bold mb-1">强制起播限时 (秒)</label>
+                            <div class="input-group input-group-sm shadow-sm">
+                                <input type="number" step="0.1" name="buffer_timeout" value="{{ buffer_timeout }}" class="form-control">
+                                <span class="input-group-text bg-light text-muted">秒</span>
+                            </div>
+                        </div>
+                        <div class="col-md-4">
+                            <button type="submit" class="btn btn-primary btn-sm w-100 shadow-sm fw-bold">💾 保存引擎配置</button>
+                        </div>
                     </div>
                 </form>
-                <div class="mt-2 small text-muted"><i data-lucide="info" size="12"></i> 提示：起播阈值推荐 10-20，限时推荐 2.0-5.0。阈值越大前期越不容易卡顿，但起播会变慢。</div>
+                <div class="mt-3 p-2 rounded" style="background: rgba(59, 130, 246, 0.05); border: 1px solid rgba(59, 130, 246, 0.1);">
+                    <small class="text-muted" style="font-size: 0.75rem;">
+                        <i data-lucide="info" size="14" class="text-primary me-1"></i>
+                        <b>优化建议</b>：网络易抖动时，建议将 <b>起播阈值调至 15~25</b>，<b>限时调至 3.0~5.0</b>。这会强制积累缓存再播放，有效防卡顿。
+                    </small>
+                </div>
             </div>
 
+            <!-- 视频源配置 -->
             <div class="clean-card">
-                <div class="card-title">📺 视频订阅源</div>
-                <form action="/add_source" method="post" class="row g-2 mb-3">
+                <div class="card-title"><i data-lucide="tv"></i> 视频订阅源</div>
+                <form action="/add_source" method="post" class="row g-2 mb-4">
                     <div class="col-md-3"><input type="text" name="name" class="form-control form-control-sm" placeholder="名称" required></div>
                     <div class="col-md-5"><input type="text" name="url" class="form-control form-control-sm" placeholder="M3U/TXT 链接" required></div>
                     <div class="col-md-2"><select name="type" class="form-select form-select-sm"><option value="m3u">M3U</option><option value="txt">TXT</option></select></div>
                     <div class="col-md-2"><button type="submit" class="btn btn-primary btn-sm w-100">✨ 添加</button></div>
                 </form>
                 <div class="table-responsive">
-                    <table class="table align-middle small mb-0">
-                        <thead class="text-muted"><tr><th>标识</th><th>类型</th><th>操作</th></tr></thead>
+                    <table class="table table-hover align-middle small mb-0">
+                        <thead><tr><th>名称</th><th>状态</th><th>最后检测</th><th>操作</th></tr></thead>
                         <tbody>
                             {% for s in sources %}
-                            <tr><td class="fw-bold">{{ s.name }}</td><td>{{ s.type.upper() }}</td><td><a href="/delete/{{s.id}}" class="text-danger">移除</a></td></tr>
+                            <tr>
+                                <td class="fw-bold">{{ s.name }}</td>
+                                <td><span class="badge bg-{{'success' if s.status=='Online' else 'danger'}}">{{ s.status }}</span></td>
+                                <td class="text-muted time-ago" data-time="{{ s.last_check }}">-</td>
+                                <td><a href="/delete/{{ s.id }}" class="text-danger" onclick="return confirm('删除源？')"><i data-lucide="trash-2" size="16"></i></a></td>
+                            </tr>
                             {% endfor %}
                         </tbody>
                     </table>
                 </div>
             </div>
 
+            <!-- EPG配置 -->
             <div class="clean-card">
-                <div class="card-title">📅 EPG 抓取源</div>
-                <form action="/add_epg_source" method="post" class="row g-2 mb-3">
-                    <div class="col-md-4"><input type="text" name="name" class="form-control form-control-sm" placeholder="源名称" required></div>
-                    <div class="col-md-6"><input type="text" name="url" class="form-control form-control-sm" placeholder="XML/GZ 链接" required></div>
-                    <div class="col-md-2"><button type="submit" class="btn btn-primary btn-sm w-100">✨ 添加</button></div>
+                <div class="card-title"><i data-lucide="calendar"></i> EPG 抓取源</div>
+                <form action="/add_epg_source" method="post" class="row g-2 mb-4">
+                    <div class="col-md-4"><input type="text" name="name" class="form-control form-control-sm" placeholder="源名" required></div>
+                    <div class="col-md-6"><input type="text" name="url" class="form-control form-control-sm" placeholder="XML 链接" required></div>
+                    <div class="col-md-2"><button type="submit" class="btn btn-primary btn-sm w-100">✨ 注入</button></div>
                 </form>
-                <table class="table align-middle small mb-0">
+                <table class="table table-hover align-middle small mb-0">
+                    <thead><tr><th>名称</th><th>状态</th><th>操作</th></tr></thead>
                     <tbody>
                         {% for e in epg_sources %}
-                        <tr><td>{{ e.name }}</td><td><span class="badge bg-{{'success' if e.status=='Success' else 'danger'}}">{{ e.status }}</span></td><td><a href="/delete_epg/{{e.id}}" class="text-danger">移除</a></td></tr>
+                        <tr>
+                            <td>{{ e.name }}</td>
+                            <td><span class="badge bg-{{'success' if e.status=='Success' else 'warning'}}">{{ e.status }}</span></td>
+                            <td><a href="/delete_epg/{{ e.id }}" class="text-danger"><i data-lucide="trash-2" size="16"></i></a></td>
+                        </tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -120,28 +151,30 @@
         </div>
 
         <div class="col-lg-4">
+            <!-- 实时监控 -->
             <div class="clean-card">
-                <div class="d-flex justify-content-between align-items-center mb-3">
-                    <div class="card-title mb-0">⚡ 实时观看</div>
-                    <i data-lucide="activity" class="text-primary"></i>
+                <div class="d-flex justify-content-between align-items-center mb-4">
+                    <div class="card-title mb-0"><i data-lucide="activity"></i> 实时观看</div>
+                    <span class="badge bg-primary rounded-pill" id="active-count">0</span>
                 </div>
-                <div id="stream-monitor"><div class="text-center py-5 text-muted small">🍿 暂无活跃链路</div></div>
+                <div id="stream-monitor"><div class="text-center py-5 text-muted small"><p>🍿 暂无活跃任务</p></div></div>
             </div>
 
+            <!-- 聚合订阅链接 -->
             <div class="clean-card">
-                <div class="card-title">🔗 导出订阅</div>
-                <div class="mb-4">
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">M3U 聚合地址</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
+                <div class="card-title"><i data-lucide="link"></i> 导出订阅</div>
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted fw-bold">M3U 聚合订阅</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
                     <div class="link-copy-group">
                         <div id="m3u-link">加载中...</div>
-                        <button class="btn btn-sm text-primary fw-bold p-0 mt-2" onclick="copy('m3u-link')">📋 复制</button>
+                        <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copyText('m3u-link')">📋 复制</button>
                     </div>
                 </div>
-                <div>
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted">EPG.XML.GZ</label><span id="epg-time-display" style="font-size:0.6rem; color:#888">同步: --</span></div>
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted fw-bold">EPG.XML.GZ</label><span id="epg-time-display" style="font-size:0.6rem; color:#888">同步: --</span></div>
                     <div class="link-copy-group">
                         <div id="epg-gz-link">加载中...</div>
-                        <button class="btn btn-sm text-primary fw-bold p-0 mt-2" onclick="copy('epg-gz-link')">📋 复制</button>
+                        <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copyText('epg-gz-link')">📋 复制</button>
                     </div>
                 </div>
             </div>
@@ -156,10 +189,23 @@
     lucide.createIcons();
     const base = window.location.origin;
 
+    function updateTimeLabels() {
+        const now = Math.floor(Date.now() / 1000);
+        document.querySelectorAll('.time-ago').forEach(el => {
+            const timestamp = parseFloat(el.getAttribute('data-time'));
+            if (!timestamp) { el.innerText = '待检测'; return; }
+            const diff = now - timestamp;
+            if (diff < 60) el.innerText = '刚刚';
+            else el.innerText = Math.floor(diff/60) + ' 分钟前';
+        });
+    }
+
     async function fetchData() {
         try {
             const res = await fetch('/api/status');
             const data = await res.json();
+            
+            document.getElementById('check-status-text').style.display = data.is_checking ? 'block' : 'none';
             document.getElementById('kpi-streams').innerText = data.kpis.stream_count;
             document.getElementById('kpi-peers').innerText = data.kpis.peer_count;
             document.getElementById('kpi-in').innerText = data.kpis.total_in;
@@ -169,24 +215,40 @@
 
             const monitor = document.getElementById('stream-monitor');
             if (data.active_streams.length === 0) {
-                monitor.innerHTML = '<div class="text-center py-5 text-muted small">🍿 暂无活跃链路</div>';
+                monitor.innerHTML = `<div class="text-center py-5 text-muted small"><p>🍿 暂无活跃任务</p></div>`;
             } else {
-                monitor.innerHTML = data.active_streams.map(s => `
+                monitor.innerHTML = data.active_streams.map(s => {
+                    const activePeers = s.peers > 0;
+                    if (!activePeers) return ''; // 仅显示有观众的链路
+                    return `
                     <div class="stream-item">
-                        <div class="d-flex justify-content-between mb-1"><span class="fw-bold text-primary">${s.name}</span><span class="badge bg-primary rounded-pill">${s.peers} P</span></div>
+                        <div class="d-flex justify-content-between align-items-center mb-1">
+                            <div class="fw-bold text-primary">${s.name}</div>
+                            <span class="badge bg-primary rounded-pill">${s.peers} P</span>
+                        </div>
                         <div class="d-flex justify-content-between mb-1 small"><span style="color:#007aff">📥 ${s.in_speed}</span><span style="color:#ff9500">📤 ${s.out_speed}</span></div>
                         <div class="progress mb-2"><div class="progress-bar bg-primary" style="width: ${s.buffer.split('/')[0]}%"></div></div>
-                        <div class="small text-muted" style="font-size:0.6rem">缓存: ${s.buffer} | ${s.info.res}</div>
-                    </div>
-                `).join('');
+                        <div class="small text-muted" style="font-size:0.65rem">缓冲深度: ${s.buffer} | ${s.info.res}</div>
+                        <div class="mt-2">${s.clients.map(c => `<span class="client-info"><i data-lucide="user" size="8"></i> ${c.ip}</span>`).join('')}</div>
+                    </div>`
+                }).join('');
+                lucide.createIcons();
             }
             if (data.epg_logs && data.epg_logs.length > 0) document.getElementById('log-container').innerHTML = data.epg_logs.join('<br>');
         } catch(e) {}
     }
-    function copy(id) { navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("✅ 已复制")); }
+
+    function copyText(id) {
+        navigator.clipboard.writeText(document.getElementById(id).innerText).then(() => alert("✅ 已复制"));
+    }
+
     document.getElementById('m3u-link').innerText = base + '/playlist.m3u?proxy=True';
     document.getElementById('epg-gz-link').innerText = base + '/epg.xml.gz';
-    setInterval(fetchData, 3000); fetchData();
+
+    setInterval(updateTimeLabels, 10000);
+    setInterval(fetchData, 3000);
+    updateTimeLabels(); fetchData();
 </script>
+
 </body>
 </html>
