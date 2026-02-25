@@ -39,7 +39,7 @@
                 <span class="spinner-border spinner-border-sm me-1 text-primary"></span>
             </span>
             <button class="btn btn-sm btn-outline-dark fw-bold" data-bs-toggle="modal" data-bs-target="#logModal">📜 EPG日志</button>
-            <a href="/refresh" class="btn btn-sm btn-outline-primary fw-bold">🔄 同步数据</a>
+            <a href="/refresh" class="btn btn-sm btn-outline-primary fw-bold">🔄 同步EPG</a>
             <a href="/logout" class="btn btn-sm btn-outline-danger fw-bold">🚪 退出</a>
         </div>
     </div>
@@ -73,6 +73,7 @@
                             <input type="number" name="epg_days" value="{{ epg_days }}" class="form-control form-control-sm shadow-sm">
                         </div>
                     </div>
+                    
                     <div class="row g-3 align-items-end">
                         <div class="col-md-4">
                             <label class="small text-muted fw-bold mb-1">起播阈值 (数据块)</label>
@@ -93,17 +94,16 @@
                         </div>
                     </div>
                 </form>
-                <div class="mt-3 p-2 rounded" style="background: rgba(59, 130, 246, 0.05); border: 1px solid rgba(59, 130, 246, 0.1);">
-                    <small class="text-muted" style="font-size: 0.75rem;">
-                        <i data-lucide="info" size="14" class="text-primary me-1"></i>
-                        <b>优化建议</b>：网络易抖动时，建议将 <b>起播阈值调至 15~25</b>，<b>限时调至 3.0~5.0</b>。这会强制积累缓存再播放，有效防卡顿。
-                    </small>
-                </div>
             </div>
 
             <!-- 视频源配置 -->
             <div class="clean-card">
-                <div class="card-title"><i data-lucide="tv"></i> 视频订阅源</div>
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="card-title mb-0"><i data-lucide="tv"></i> 视频订阅源</div>
+                    <a href="/check_sources" class="btn btn-sm btn-outline-primary fw-bold" style="padding: 3px 10px; font-size: 0.8rem;">
+                        <i data-lucide="activity" size="14"></i> 测活
+                    </a>
+                </div>
                 <form action="/add_source" method="post" class="row g-2 mb-4">
                     <div class="col-md-3"><input type="text" name="name" class="form-control form-control-sm" placeholder="名称" required></div>
                     <div class="col-md-5"><input type="text" name="url" class="form-control form-control-sm" placeholder="M3U/TXT 链接" required></div>
@@ -112,12 +112,14 @@
                 </form>
                 <div class="table-responsive">
                     <table class="table table-hover align-middle small mb-0">
-                        <thead><tr><th>名称</th><th>状态</th><th>最后检测</th><th>操作</th></tr></thead>
+                        <thead class="text-muted"><tr><th>名称</th><th>状态</th><th>最后检测</th><th>操作</th></tr></thead>
                         <tbody>
                             {% for s in sources %}
                             <tr>
                                 <td class="fw-bold">{{ s.name }}</td>
-                                <td><span class="badge bg-{{'success' if s.status=='Online' else 'danger'}}">{{ s.status }}</span></td>
+                                <td>
+                                    <span class="badge bg-{{'success' if s.status=='Online' else 'danger' if s.status=='Offline' else 'secondary'}}">{{ s.status }}</span>
+                                </td>
                                 <td class="text-muted time-ago" data-time="{{ s.last_check }}">-</td>
                                 <td><a href="/delete/{{ s.id }}" class="text-danger" onclick="return confirm('删除源？')"><i data-lucide="trash-2" size="16"></i></a></td>
                             </tr>
@@ -136,14 +138,9 @@
                     <div class="col-md-2"><button type="submit" class="btn btn-primary btn-sm w-100">✨ 注入</button></div>
                 </form>
                 <table class="table table-hover align-middle small mb-0">
-                    <thead><tr><th>名称</th><th>状态</th><th>操作</th></tr></thead>
                     <tbody>
                         {% for e in epg_sources %}
-                        <tr>
-                            <td>{{ e.name }}</td>
-                            <td><span class="badge bg-{{'success' if e.status=='Success' else 'warning'}}">{{ e.status }}</span></td>
-                            <td><a href="/delete_epg/{{ e.id }}" class="text-danger"><i data-lucide="trash-2" size="16"></i></a></td>
-                        </tr>
+                        <tr><td>{{ e.name }}</td><td><span class="badge bg-{{'success' if e.status=='Success' else 'warning'}}">{{ e.status }}</span></td><td><a href="/delete_epg/{{ e.id }}" class="text-danger">移除</a></td></tr>
                         {% endfor %}
                     </tbody>
                 </table>
@@ -153,28 +150,28 @@
         <div class="col-lg-4">
             <!-- 实时监控 -->
             <div class="clean-card">
-                <div class="d-flex justify-content-between align-items-center mb-4">
-                    <div class="card-title mb-0"><i data-lucide="activity"></i> 实时观看</div>
-                    <span class="badge bg-primary rounded-pill" id="active-count">0</span>
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <div class="card-title mb-0">⚡ 实时观看</div>
+                    <i data-lucide="activity" class="text-primary"></i>
                 </div>
-                <div id="stream-monitor"><div class="text-center py-5 text-muted small"><p>🍿 暂无活跃任务</p></div></div>
+                <div id="stream-monitor"><div class="text-center py-5 text-muted small">🍿 暂无活跃链路</div></div>
             </div>
 
             <!-- 聚合订阅链接 -->
             <div class="clean-card">
                 <div class="card-title"><i data-lucide="link"></i> 导出订阅</div>
-                <div class="mb-3">
-                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted fw-bold">M3U 聚合订阅</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
+                <div class="mb-4">
+                    <div class="d-flex justify-content-between mb-1"><label class="small text-muted fw-bold">M3U 聚合地址</label><span id="m3u-time" style="font-size:0.6rem; color:#888">拉取: --</span></div>
                     <div class="link-copy-group">
                         <div id="m3u-link">加载中...</div>
-                        <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copyText('m3u-link')">📋 复制</button>
+                        <button class="btn btn-sm text-primary fw-bold p-0 mt-2" onclick="copyText('m3u-link')">📋 复制</button>
                     </div>
                 </div>
-                <div class="mb-3">
+                <div>
                     <div class="d-flex justify-content-between mb-1"><label class="small text-muted fw-bold">EPG.XML.GZ</label><span id="epg-time-display" style="font-size:0.6rem; color:#888">同步: --</span></div>
                     <div class="link-copy-group">
                         <div id="epg-gz-link">加载中...</div>
-                        <button class="btn btn-sm text-primary p-0 mt-2 fw-bold" onclick="copyText('epg-gz-link')">📋 复制</button>
+                        <button class="btn btn-sm text-primary fw-bold p-0 mt-2" onclick="copyText('epg-gz-link')">📋 复制</button>
                     </div>
                 </div>
             </div>
@@ -193,10 +190,11 @@
         const now = Math.floor(Date.now() / 1000);
         document.querySelectorAll('.time-ago').forEach(el => {
             const timestamp = parseFloat(el.getAttribute('data-time'));
-            if (!timestamp) { el.innerText = '待检测'; return; }
+            if (!timestamp || timestamp === 0) { el.innerText = '待检测'; return; }
             const diff = now - timestamp;
             if (diff < 60) el.innerText = '刚刚';
-            else el.innerText = Math.floor(diff/60) + ' 分钟前';
+            else if (diff < 3600) el.innerText = Math.floor(diff/60) + ' 分钟前';
+            else el.innerText = Math.floor(diff/3600) + ' 小时前';
         });
     }
 
@@ -215,11 +213,11 @@
 
             const monitor = document.getElementById('stream-monitor');
             if (data.active_streams.length === 0) {
-                monitor.innerHTML = `<div class="text-center py-5 text-muted small"><p>🍿 暂无活跃任务</p></div>`;
+                monitor.innerHTML = `<div class="text-center py-5 text-muted small"><p>🍿 暂无活跃链路</p></div>`;
             } else {
                 monitor.innerHTML = data.active_streams.map(s => {
                     const activePeers = s.peers > 0;
-                    if (!activePeers) return ''; // 仅显示有观众的链路
+                    if (!activePeers) return ''; 
                     return `
                     <div class="stream-item">
                         <div class="d-flex justify-content-between align-items-center mb-1">
