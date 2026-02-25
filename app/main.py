@@ -19,7 +19,7 @@ from sqlmodel import Field, Session, SQLModel, create_engine, select
 from sqlalchemy import text
 from lxml import etree
 
-# --- 1. 初始化 ---
+# --- 1. 配置与日志 ---
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("IPTV-Manager")
 
@@ -44,11 +44,17 @@ class Setting(SQLModel, table=True):
 
 SQLModel.metadata.create_all(engine)
 
+# 初始化设置 (加入起播阈值与起播限时)
 with Session(engine) as session:
-    if not session.get(Setting, "epg_days"): session.add(Setting(key="epg_days", value="3"))
-    if not session.get(Setting, "proxy_mode"): session.add(Setting(key="proxy_mode", value="1"))
-    if not session.get(Setting, "epg_interval"): session.add(Setting(key="epg_interval", value="6"))
-    session.commit()
+    try:
+        if not session.get(Setting, "epg_days"): session.add(Setting(key="epg_days", value="3"))
+        if not session.get(Setting, "proxy_mode"): session.add(Setting(key="proxy_mode", value="1"))
+        if not session.get(Setting, "epg_interval"): session.add(Setting(key="epg_interval", value="6"))
+        if not session.get(Setting, "buffer_threshold"): session.add(Setting(key="buffer_threshold", value="15"))
+        if not session.get(Setting, "buffer_timeout"): session.add(Setting(key="buffer_timeout", value="3.0"))
+        session.commit()
+    except Exception as e:
+        logger.error(f"DB Init Error: {e}")
 
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
@@ -62,140 +68,35 @@ class GlobalState:
         self.categories = []; self.channel_to_category = {}
 state = GlobalState()
 
-def is_authenticated(request: Request):
-    return request.cookies.get("session_id") == SECRET_KEY
+def is_authenticated(request: Request): return request.cookies.get("session_id") == SECRET_KEY
 
-# --- 2. 蓄水池流控引擎 (修正释放与统计) ---
-
-class StreamPool:
-    def __init__(self):
-        self.streams: Dict = {}
-
-    async def get_stream_info(self, url: str):
-        try:
-            cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
-            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=10.0)
-            data = json.loads(stdout)
-            if 'streams' in data and data['streams']:
-                s = data['streams'][0]
-                return {"res": f"{s.get('width')}x{s.get('height')}", "codec": s.get('codec_name', '未知').upper()}
-        except: pass
-        return {"res": "未知", "codec": "未知"}
-
-    async def _fetcher(self, stream_id: str, url: str, name: str):
-        logger.info(f"🚀 [启动中继] {name}")
-        while stream_id in self.streams:
-            if not self.streams[stream_id]["clients"]:
-                # 观众全走后，立即重置网速显示，防止残留
-                self.streams[stream_id]["in_speed"] = "0 KB/s"
-                self.streams[stream_id]["out_speed"] = "0 KB/s"
-                await asyncio.sleep(5) # 5秒静默释放期
-                if not self.streams[stream_id]["clients"]:
-                    logger.info(f"👋 [释放链路] {name}")
-                    break
-            
-            try:
-                if self.streams[stream_id]["info"]["res"] == "探测中...":
-                    self.streams[stream_id]["info"] = await self.get_stream_info(url)
-
-                async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, read=15.0), follow_redirects=True) as client:
-                    async with client.stream("GET", url) as r:
-                        if r.status_code != 200: raise Exception(f"HTTP {r.status_code}")
-                        
-                        start_time, bytes_in = time.time(), 0
-                        async for chunk in r.aiter_bytes(chunk_size=128*1024):
-                            if not self.streams[stream_id]["clients"]: break # 没人看就跳出拉流
-                            
-                            self.streams[stream_id]["history"].append(chunk)
-                            bytes_in += len(chunk); now = time.time()
-                            if now - start_time >= 1.0:
-                                self.streams[stream_id]["in_speed"] = f"{(bytes_in/1024/(now-start_time)):.1f} KB/s"
-                                bytes_in, start_time = 0, now
-                            
-                            for q in self.streams[stream_id]["queues"]:
-                                try: q.put_nowait(chunk)
-                                except: pass
-            except:
-                if stream_id in self.streams: self.streams[stream_id]["in_speed"] = "重连中..."
-                await asyncio.sleep(3)
-        self.streams.pop(stream_id, None)
-
-    async def subscribe(self, name: str, url: str, client_ip: str):
-        stream_id = hashlib.md5(url.encode()).hexdigest()
-        client_id = hashlib.md5(f"{client_ip}{time.time()}".encode()).hexdigest()[:8]
-        
-        if stream_id not in self.streams:
-            self.streams[stream_id] = {
-                "name": name, "url": url, "queues": [], "clients": {}, 
-                "info": {"res": "探测中...", "codec": "探测中..."},
-                "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0,
-                "history": deque(maxlen=40)
-            }
-            asyncio.create_task(self._fetcher(stream_id, url, name))
-            await asyncio.sleep(0.5)
-
-        queue = asyncio.Queue(maxsize=100)
-        if stream_id in self.streams:
-            for old in list(self.streams[stream_id]["history"]): await queue.put(old)
-            self.streams[stream_id]["queues"].append(queue)
-            self.streams[stream_id]["clients"][client_id] = {"ip": client_ip, "out_bytes": 0, "speed": "0 KB/s", "last_ts": time.time()}
-        
-        try:
-            while True:
-                chunk = await queue.get()
-                if stream_id not in self.streams: break
-                
-                c = self.streams[stream_id]["clients"].get(client_id)
-                if c:
-                    c["out_bytes"] += len(chunk); now = time.time()
-                    if now - c["last_ts"] >= 1.0:
-                        c["speed"] = f"{(c['out_bytes']/1024/(now-c['last_ts'])):.1f} KB/s"
-                        c["out_bytes"], c["last_ts"] = 0, now
-                        # 即时汇总下游
-                        total_out = sum([float(cli["speed"].split(' ')[0]) for cli in self.streams[stream_id]["clients"].values()])
-                        self.streams[stream_id]["out_speed"] = f"{total_out:.1f} KB/s"
-                
-                self.streams[stream_id]["buffer_level"] = int((queue.qsize() / 100) * 100)
-                yield chunk
-        finally:
-            if stream_id in self.streams:
-                self.streams[stream_id]["queues"].remove(queue)
-                self.streams[stream_id]["clients"].pop(client_id, None)
-                # 观众走后如果没人了，立即清空速度显示
-                if not self.streams[stream_id]["clients"]:
-                    self.streams[stream_id]["out_speed"] = "0 KB/s"
-
-stream_pool = StreamPool()
-
-# --- 3. EPG & 别名逻辑 (同前) ---
 def load_alias_and_demo():
-    alias_path, demo_path = "alias.txt", "demo.txt"
     state.alias_map, state.regex_aliases = {}, []
-    if os.path.exists(alias_path):
-        with open(alias_path, "r", encoding="utf-8") as f:
+    if os.path.exists("alias.txt"):
+        with open("alias.txt", "r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip(); 
+                line = line.strip()
                 if not line or line.startswith("#"): continue
-                parts = line.split(","); main = parts[0].strip()
+                parts = line.split(","); main_name = parts[0].strip()
                 for a in parts[1:]:
                     a = a.strip()
                     if a.startswith("re:"):
-                        try: state.regex_aliases.append((re.compile(a[3:]), main))
+                        try: state.regex_aliases.append((re.compile(a[3:]), main_name))
                         except: pass
-                    else: state.alias_map[a.upper()] = main
+                    else: state.alias_map[a.upper()] = main_name
+
     state.categories, state.channel_to_category = [], {}
-    if os.path.exists(demo_path):
-        current_cat = None
-        with open(demo_path, "r", encoding="utf-8") as f:
+    if os.path.exists("demo.txt"):
+        cur_cat = None
+        with open("demo.txt", "r", encoding="utf-8") as f:
             for line in f:
-                line = line.strip(); 
+                line = line.strip()
                 if not line: continue
                 if ",#genre#" in line:
-                    name = line.split(",")[0].strip()
-                    current_cat = {"name": name, "channels": []}; state.categories.append(current_cat)
-                elif current_cat:
-                    ch = line.strip(); current_cat["channels"].append(ch); state.channel_to_category[ch] = current_cat["name"]
+                    cur_cat = {"name": line.split(",")[0].strip(), "channels": []}
+                    state.categories.append(cur_cat)
+                elif cur_cat:
+                    ch = line.strip(); cur_cat["channels"].append(ch); state.channel_to_category[ch] = cur_cat["name"]
 
 def get_standard_name(raw_name: str) -> str:
     name_up = raw_name.strip().upper()
@@ -207,10 +108,111 @@ def get_standard_name(raw_name: str) -> str:
         clean = re.sub(p, "", clean)
     return clean.strip()
 
+# --- 2. 蓄水池流控引擎 ---
+
+class StreamPool:
+    def __init__(self): self.streams: Dict = {}
+
+    async def get_stream_info(self, url: str):
+        try:
+            cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json', '-show_streams', '-select_streams', 'v:0', '-analyzeduration', '3000000', url]
+            proc = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=8.0)
+            data = json.loads(stdout)
+            if 'streams' in data and data['streams']:
+                s = data['streams'][0]
+                return {"res": f"{s.get('width')}x{s.get('height')}", "codec": s.get('codec_name', '未知').upper()}
+        except: pass
+        return {"res": "未知", "codec": "未知"}
+
+    async def _fetcher(self, stream_id: str, url: str, name: str):
+        logger.info(f"🚀 [中继启动] {name}")
+        while stream_id in self.streams:
+            if not self.streams[stream_id]["clients"]:
+                self.streams[stream_id]["in_speed"] = "0 KB/s"
+                await asyncio.sleep(8)
+                if not self.streams[stream_id]["clients"]:
+                    logger.info(f"👋 [停止中继] {name}")
+                    break
+            
+            try:
+                if self.streams[stream_id]["info"]["res"] == "探测中...":
+                    self.streams[stream_id]["info"] = await self.get_stream_info(url)
+                async with httpx.AsyncClient(timeout=httpx.Timeout(20.0, read=20.0), follow_redirects=True) as client:
+                    async with client.stream("GET", url) as r:
+                        if r.status_code != 200: raise Exception()
+                        start_time, bytes_in = time.time(), 0
+                        async for chunk in r.aiter_bytes(chunk_size=128*1024):
+                            if not self.streams[stream_id]["clients"]: return
+                            self.streams[stream_id]["history"].append(chunk)
+                            bytes_in += len(chunk); now = time.time()
+                            if now - start_time >= 1.0:
+                                self.streams[stream_id]["in_speed"] = f"{(bytes_in/1024/(now-start_time)):.1f} KB/s"
+                                bytes_in, start_time = 0, now
+                            for q in self.streams[stream_id]["queues"]:
+                                try: q.put_nowait(chunk)
+                                except: pass
+            except:
+                if stream_id in self.streams: self.streams[stream_id]["in_speed"] = "重连中..."
+                await asyncio.sleep(2)
+        self.streams.pop(stream_id, None)
+
+    async def subscribe(self, name: str, url: str, client_ip: str):
+        stream_id = hashlib.md5(url.encode()).hexdigest()
+        client_id = hashlib.md5(f"{client_ip}{time.time()}".encode()).hexdigest()[:8]
+        
+        if stream_id not in self.streams:
+            self.streams[stream_id] = {"name": name, "url": url, "queues": [], "clients": {}, "info": {"res": "探测中...", "codec": "探测中..."}, "in_speed": "0 KB/s", "out_speed": "0 KB/s", "buffer_level": 0, "history": deque(maxlen=50)}
+            asyncio.create_task(self._fetcher(stream_id, url, name))
+            await asyncio.sleep(0.5)
+
+        queue = asyncio.Queue(maxsize=200)
+        
+        if stream_id in self.streams:
+            for old in list(self.streams[stream_id]["history"]): await queue.put(old)
+            self.streams[stream_id]["queues"].append(queue)
+            self.streams[stream_id]["clients"][client_id] = {"ip": client_ip, "out_bytes": 0, "speed": "0 KB/s", "last_ts": time.time()}
+
+        # 核心：起播预缓冲等待逻辑
+        with Session(engine) as session:
+            try:
+                buf_thresh = int(session.get(Setting, "buffer_threshold").value)
+                buf_timeout = float(session.get(Setting, "buffer_timeout").value)
+            except: buf_thresh, buf_timeout = 15, 3.0
+            
+        wait_start = time.time()
+        # 等待队列中堆积足够的数据包，或者达到了最长等待时间
+        while queue.qsize() < buf_thresh and (time.time() - wait_start) < buf_timeout:
+            if stream_id not in self.streams: break
+            await asyncio.sleep(0.1)
+
+        try:
+            while True:
+                chunk = await queue.get()
+                if stream_id not in self.streams: break
+                c = self.streams[stream_id]["clients"].get(client_id)
+                if c:
+                    c["out_bytes"] += len(chunk); now = time.time()
+                    if now - c["last_ts"] >= 1.0:
+                        c["speed"] = f"{(c['out_bytes']/1024/(now-c['last_ts'])):.1f} KB/s"
+                        c["out_bytes"], c["last_ts"] = 0, now
+                        total_out = sum([float(cli["speed"].split(' ')[0]) for cli in self.streams[stream_id]["clients"].values()])
+                        self.streams[stream_id]["out_speed"] = f"{total_out:.1f} KB/s"
+                self.streams[stream_id]["buffer_level"] = int((queue.qsize() / 200) * 100)
+                yield chunk
+        finally:
+            if stream_id in self.streams:
+                self.streams[stream_id]["queues"].remove(queue)
+                self.streams[stream_id]["clients"].pop(client_id, None)
+                if not self.streams[stream_id]["clients"]: self.streams[stream_id]["out_speed"] = "0 KB/s"
+
+stream_pool = StreamPool()
+
+# --- 3. EPG & 订阅 ---
 async def update_epg_task():
     if state.is_epg_updating: return
     state.is_epg_updating = True; load_alias_and_demo()
-    ts = datetime.now().strftime("%H:%M:%S"); state.epg_logs.insert(0, f"[{ts}] ⏳ 启动聚合...")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S"); state.epg_logs.insert(0, f"[{ts}] ⏳ 启动聚合...")
     master = etree.Element("tv")
     with Session(engine) as session:
         eps = session.exec(select(EPGSource)).all()
@@ -245,47 +247,26 @@ async def startup():
         while True: await asyncio.sleep(3600 * 6); await update_epg_task()
     asyncio.create_task(loop())
 
-# --- 4. 路由逻辑 (修正统计汇总) ---
-
+# --- 4. 路由逻辑 ---
 @app.get("/api/status")
 async def api_status():
-    active = []
-    total_in, total_out, total_peers = 0, 0, 0
-    # 遍历所有存在的流（包括正在5秒宽限期内的）
+    active, total_in, total_out, total_peers = [], 0, 0, 0
     for s_id, d in list(stream_pool.streams.items()):
-        num_clients = len(d["clients"])
-        # 如果没人看且处于释放期，KPI 汇总时跳过其流量统计
-        if num_clients > 0:
-            try:
-                total_in += float(d["in_speed"].split(' ')[0])
-                total_out += float(d["out_speed"].split(' ')[0])
+        num_c = len(d["clients"])
+        if num_c > 0:
+            try: total_in += float(d["in_speed"].split(' ')[0]); total_out += float(d["out_speed"].split(' ')[0])
             except: pass
-            total_peers += num_clients
-            
-        active.append({
-            "name": d["name"], "url": d["url"], "in_speed": d["in_speed"], 
-            "out_speed": d["out_speed"], "peers": num_clients,
-            "info": d["info"], "buffer": f"{d.get('buffer_level', 0)}/100",
-            "clients": list(d["clients"].values())
-        })
-    
-    return {
-        "active_streams": active, "is_checking": state.is_epg_updating,
-        "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "待同步",
-        "last_m3u": time.strftime("%H:%M:%S", time.localtime(state.last_playlist_request)) if state.last_playlist_request else "无请求",
-        "kpis": {"total_in": f"{total_in:.1f} KB/s", "total_out": f"{total_out:.1f} KB/s", "stream_count": len([x for x in active if x['peers'] > 0]), "peer_count": total_peers},
-        "epg_logs": state.epg_logs
-    }
+            total_peers += num_c
+        active.append({"name": d["name"], "url": d["url"], "in_speed": d["in_speed"], "out_speed": d["out_speed"], "peers": num_c, "info": d["info"], "buffer": f"{d.get('buffer_level', 0)}/100", "clients": list(d["clients"].values())})
+    return {"active_streams": active, "is_checking": state.is_epg_updating, "last_epg": time.strftime("%H:%M:%S", time.localtime(state.last_epg_update)) if state.last_epg_update else "待同步", "last_m3u": time.strftime("%H:%M:%S", time.localtime(state.last_playlist_request)) if state.last_playlist_request else "无请求", "kpis": {"total_in": f"{total_in:.1f} KB/s", "total_out": f"{total_out:.1f} KB/s", "stream_count": len([x for x in active if x['peers']>0]), "peer_count": total_peers}, "epg_logs": state.epg_logs}
 
-# --- 其他路由保持原样 (get_playlist, login, logout, add_source, etc.) ---
 @app.get("/playlist.m3u")
 @app.get("/playlist.txt")
 async def get_playlist(request: Request, proxy: bool = False):
     scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
     host = request.headers.get("host", str(request.base_url.netloc))
     base_url = f"{scheme}://{host}"
-    with Session(engine) as session:
-        sources = session.exec(select(Source)).all(); p_mode = int(session.get(Setting, "proxy_mode").value)
+    with Session(engine) as session: sources = session.exec(select(Source)).all(); p_mode = int(session.get(Setting, "proxy_mode").value)
     unique_channels, seen_urls = [], set()
     async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as client:
         results = await asyncio.gather(*[client.get(s.url) for s in sources], return_exceptions=True)
@@ -306,7 +287,6 @@ async def get_playlist(request: Request, proxy: bool = False):
                     cat = state.channel_to_category.get(standard, "其他频道")
                     use_p = proxy or (p_mode == 2) or (p_mode == 1 and ("/udp/" in u or "/rtp/" in u))
                     unique_channels.append({"name": standard, "url": u, "group": cat, "use_proxy": use_p}); seen_urls.add(u)
-    # 排序
     cat_order = {cat['name']: i for i, cat in enumerate(state.categories)}; cat_order["其他频道"] = 999
     def sort_key(ch):
         cw = cat_order.get(ch['group'], 998); chw = 999
@@ -315,31 +295,43 @@ async def get_playlist(request: Request, proxy: bool = False):
                 if n == ch['name']: chw = i; break
         return (cw, chw, ch['name'])
     unique_channels.sort(key=sort_key); state.last_playlist_request = time.time()
+    
     if request.url.path.endswith('.txt'):
-        lines = []
+        lines, cur_cat = [], ""
         for c in unique_channels:
-            final = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
-            lines.append(f"{c['name']},{final}")
+            if c['group'] != cur_cat: cur_cat = c['group']; lines.append(f"{cur_cat},#genre#")
+            p_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+            lines.append(f"{c['name']},{p_url}")
         return Response(content="\n".join(lines), media_type="text/plain")
+    
     output = f'#EXTM3U x-tvg-url="{base_url}/epg.xml.gz"\n'
     for c in unique_channels:
-        final = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
-        output += f'#EXTINF:-1 tvg-logo="{LOGO_BASE}{c["name"].upper()}.png" group-title="{c["group"]}",{c["name"]}\n{final}\n'
+        logo = f"{LOGO_BASE}{c['name'].upper()}.png"
+        p_url = f"{base_url}/live/{c['name']}?url={urllib.parse.quote(c['url'], safe='')}" if c['use_proxy'] else c['url']
+        output += f'#EXTINF:-1 tvg-logo="{logo}" group-title="{c["group"]}",{c["name"]}\n{p_url}\n'
     return Response(content=output, media_type="application/x-mpegurl")
 
 @app.get("/")
 async def index(request: Request):
     if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
-    with Session(engine) as session: return templates.TemplateResponse("index.html", {"request": request, "sources": session.exec(select(Source)).all(), "epg_sources": session.exec(select(EPGSource)).all(), "epg_days": session.get(Setting, "epg_days").value, "proxy_mode": session.get(Setting, "proxy_mode").value})
+    with Session(engine) as session: 
+        return templates.TemplateResponse("index.html", {
+            "request": request, "sources": session.exec(select(Source)).all(), 
+            "epg_sources": session.exec(select(EPGSource)).all(), 
+            "epg_days": session.get(Setting, "epg_days").value, 
+            "proxy_mode": session.get(Setting, "proxy_mode").value,
+            "buffer_threshold": session.get(Setting, "buffer_threshold").value,
+            "buffer_timeout": session.get(Setting, "buffer_timeout").value
+        })
 @app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request): return templates.TemplateResponse("login.html", {"request": request})
+async def l_p(request: Request): return templates.TemplateResponse("login.html", {"request": request})
 @app.post("/login")
-async def login_post(username: str = Form(...), password: str = Form(...)):
+async def l_post(username: str = Form(...), password: str = Form(...)):
     if username == ADMIN_USER and password == ADMIN_PASS:
         r = RedirectResponse(url="/", status_code=303); r.set_cookie(key="session_id", value=SECRET_KEY, max_age=604800, httponly=True); return r
     return RedirectResponse(url="/login?error=1", status_code=303)
 @app.get("/logout")
-async def logout(): r = RedirectResponse(url="/login", status_code=303); r.delete_cookie("session_id"); return r
+async def l_out(): r = RedirectResponse(url="/login", status_code=303); r.delete_cookie("session_id"); return r
 @app.get("/live/{channel_name}")
 async def proxy_live(request: Request, channel_name: str, url: str):
     client_ip = request.headers.get("x-real-ip") or request.client.host
@@ -370,13 +362,18 @@ async def d_e(request: Request, eid: int):
         e = session.get(EPGSource, eid);
         if e: session.delete(e); session.commit()
     return RedirectResponse(url="/", status_code=303)
+
 @app.post("/update_global_settings")
-async def u_g(request: Request, proxy_mode: str = Form(...), epg_days: str = Form(...)):
+async def u_g(request: Request, proxy_mode: str = Form(...), epg_days: str = Form(...), buffer_threshold: str = Form(...), buffer_timeout: str = Form(...)):
     if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
     with Session(engine) as session:
-        pm = session.get(Setting, "proxy_mode"); pm.value = proxy_mode; session.add(pm)
-        ed = session.get(Setting, "epg_days"); ed.value = epg_days; session.add(ed)
-        session.commit(); return RedirectResponse(url="/", status_code=303)
+        session.get(Setting, "proxy_mode").value = proxy_mode
+        session.get(Setting, "epg_days").value = epg_days
+        session.get(Setting, "buffer_threshold").value = buffer_threshold
+        session.get(Setting, "buffer_timeout").value = buffer_timeout
+        session.commit()
+    return RedirectResponse(url="/", status_code=303)
+
 @app.get("/refresh")
 async def ref(request: Request):
     if not is_authenticated(request): return RedirectResponse(url="/login", status_code=303)
